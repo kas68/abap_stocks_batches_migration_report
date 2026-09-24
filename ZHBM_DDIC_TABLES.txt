@@ -1,0 +1,132 @@
+********************************************************************************
+* HBM - Phase 1 : Batch Stock Transfer to New Plant (Split Valuation)
+* Spec: FSD_TSD_HBM_SplitValuation_Phase1_ZHBM_SPLIT_VAL_PH1 v0.3
+* Program version: v0.3 (messages 016-022 added, no table change)
+* DDIC objects to create in SE11 BEFORE activating ZHBM_SPLIT_VAL_PH1
+********************************************************************************
+* Log tables:
+*   - ZLOT_MOV_EXEC  : one line per processed record / 301 attempt
+*   - ZLOT_BATCH_EXT : one line per batch extension (BAPI_BATCH_CREATE)
+* Both client-dependent, delivery class A, Display/Maintenance allowed.
+********************************************************************************
+
+================================================================================
+DOMAINS / DATA ELEMENTS
+================================================================================
+Reuse standard: MATNR, CHARG_D, WERKS_D, LGORT_D, BWTAR_D, BWKEY, XCHPF,
+MENGE_D, MEINS, BWART, BUDAT, MBLNR, MJAHR, SYMSGID, SYMSGNO, SYMSGTY,
+ERNAM, ERDAT, ERZET.
+
+Custom:
+Data element ZLOT_RUN_ID   Domain CHAR32     Migration run id (base)
+Data element ZLOT_RUN_SEQ  Domain NUMC3      Restart sequence (001,002,...)
+Data element ZLOT_RUN_MODE Domain ZLOT_RUN_MODE (CHAR1)
+   Fixed values: F = Full Validation Mode
+                 D = Direct Transfer Mode
+Data element ZLOT_STATUS   Domain ZLOT_STATUS (CHAR1)
+   Fixed values: S = Success / posted
+                 E = Error / blocked / excluded
+                 W = Warning
+                 T = Test / Simulation (not posted)
+                 Z = Zero quantity - no movement
+                 X = Skipped (reconciliation / not processed)
+                 I = Inconsistent (SAP stock not in input file, segment exists)
+
+================================================================================
+TABLE  ZLOT_MOV_EXEC   "Phase1 - movement execution log
+================================================================================
+Delivery class A            Data maintenance: Display/Maintenance Allowed
+Field         Key  Element / Type       Description
+--------------------------------------------------------------------------------
+MANDT          X   MANDT                 Client
+RUN_ID         X   ZLOT_RUN_ID           Migration run id (base)
+RUN_SEQ        X   ZLOT_RUN_SEQ          Restart sequence (001,002,...)
+POSNR          X   NUMC6                 Sequential line no. within attempt
+RUN_MODE           ZLOT_RUN_MODE         Execution mode (F/D)
+TESTRUN            XFELD (CHAR1)         'X' = simulation, no posting
+MATNR              MATNR                 Material
+CHARG              CHARG_D               Batch (blank for non-batch material)
+XCHPF              XCHPF                 'X' = batch-managed material
+BWTAR              BWTAR_D               Valuation type (target)
+WERKS_SRC          WERKS_D               Source plant (8P01)
+WERKS_DST          WERKS_D               Target plant
+LGORT_SRC          LGORT_D               Issuing storage location  [v0.2]
+LGORT_DST          LGORT_D               Receiving storage location [v0.2]
+BWART              BWART                 Movement type (301)
+BUDAT              BUDAT                 Posting date of the movement [v0.2]
+MENGE              MENGE_D               Quantity posted on this line
+                                         (per issuing storage location)
+MEINS              MEINS                 Base unit of measure
+STOCK_SAP          MENGE_D               SAP unrestricted stock at validation
+QTY_INPUT          MENGE_D               Input-file quantity (line/aggregated)
+VARIANCE           MENGE_D               Input file - SAP variance
+STATUS             ZLOT_STATUS           Record result
+MBLNR              MBLNR                 Material document (if posted)
+MJAHR              MJAHR                 Fiscal / document year
+MSGTY              SYMSGTY               Message type
+MSGID              SYMSGID               Message class
+MSGNO              SYMSGNO               Message number
+MSGTX              NATXT (CHAR200)       Message text
+ERNAM              ERNAM                 Created by
+ERDAT              ERDAT                 Created on
+ERZET              ERZET                 Created at
+
+Technical: buffering off, size category 2.
+
+Note [v0.2]: one row is written per input line AND per issuing storage
+location. MENGE carries the quantity of that posting line, QTY_INPUT the
+quantity of the whole input-file line, so QTY_INPUT repeats across the
+rows of the same line. All rows of one input line share MBLNR / MJAHR.
+
+================================================================================
+TABLE  ZLOT_BATCH_EXT   "Phase1 - batch extension log
+================================================================================
+Delivery class A            Data maintenance: Display/Maintenance Allowed
+Field         Key  Element / Type       Description
+--------------------------------------------------------------------------------
+MANDT          X   MANDT                 Client
+RUN_ID         X   ZLOT_RUN_ID           Migration run id
+RUN_SEQ        X   ZLOT_RUN_SEQ          Restart sequence
+MATNR          X   MATNR                 Material
+CHARG          X   CHARG_D               Batch
+WERKS_DST      X   WERKS_D               Target plant
+STATUS             ZLOT_STATUS           Extension result (S/E/T)
+ALREADY_EXIST      XFELD (CHAR1)         'X' = batch already existed
+MSGTY              SYMSGTY               Message type
+MSGID              SYMSGID               Message class
+MSGNO              SYMSGNO               Message number
+MSGTX              NATXT (CHAR200)       Message text
+ERNAM              ERNAM                 Created by
+ERDAT              ERDAT                 Created on
+ERZET              ERZET                 Created at
+
+================================================================================
+MESSAGE CLASS  ZHBM  (SE91) - used by the program
+================================================================================
+002  Zero quantity in input file - no movement created
+003  Valuation type &1 not created in target plant &2
+004  Quantity mismatch: file &1 vs SAP &2 (variance &3)
+005  Cannot allocate &1 &2 to storage locations of plant &3 (&4 available)
+006  No unrestricted stock in plant &1 for material &2 batch &3
+007  Line &1: quantity &2 is not numeric - line rejected
+008  Line &1: negative quantity &2 - line rejected
+009  Line &1: layout error (field count / mandatory field) - line rejected
+010  Inconsistency: SAP stock not in input file but valuation segment exists
+011  SAP stock not in input file (no target segment) - not processed
+012  &1 input line(s): batch column normalised to blank (placeholder value,
+     or material not batch-managed)
+013  Material &1 is batch-managed in plant &2 but the input line declares NO_BATCH
+014  Material &1 is not extended to plant &2
+015  Material &1 declares NO_BATCH but holds unrestricted batch stock in
+     plant &2 (MCHB)
+016  Batch &1 of material &2 split over several valuation types - batch
+     rejected (one valuation type per batch)                        [v0.3]
+017  Line &1: unit of measure &2 unknown - line rejected            [v0.3]
+018  Unit &1 differs from base unit &2 of material &3               [v0.3]
+019  Batch &1 exists in plant &2 with valuation type &3, file gives &4
+                                                                    [v0.3]
+020  Source batch &1 cannot be read in plant &2                     [v0.3]
+022  Update failed after commit - document &1 not posted            [v0.3]
+(The program currently passes free text in MSGTX; message-class entries are
+ recommended so MSGID/MSGNO are meaningful for reporting.)
+********************************************************************************
