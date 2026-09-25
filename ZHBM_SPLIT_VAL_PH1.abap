@@ -3,9 +3,9 @@
 *&---------------------------------------------------------------------*
 *& Project : HBM - Split Valuation migration
 *& Phase   : 1 - Clearing of batch stocks / Inter-plant transfer
-*& Spec    : FSD_TSD_HBM_SplitValuation_Phase1_ZHBM_SPLIT_VAL_PH1 v0.3
+*& Spec    : FSD_TSD_HBM_SplitValuation_Phase1_ZHBM_SPLIT_VAL_PH1 v0.4
 *&           (supersedes Sfd_0001_0002_Out_In_V02)
-*& Version : v0.3 (see change log)
+*& Version : v0.4 (see change log)
 *&
 *& Purpose : Transfer unrestricted stock of batch-managed AND non-batch
 *&           materials from source plant 8P01 to a newly created plant
@@ -13,7 +13,7 @@
 *&           Quantities and the material/batch/valuation-type mapping come
 *&           from the HBM Valuation Type Input File.
 *&
-*& Processing (per FSD v0.3):
+*& Processing (per FSD v0.4):
 *&   3.1 Read SAP stock in 8P01 (unrestricted only), PER STORAGE LOCATION;
 *&       flag batch mgmt.
 *&   3.2 Presence in input file. Material/batch in SAP but NOT in file:
@@ -30,7 +30,10 @@
 *&       lines post no movement.
 *&   3.6 Storage-location allocation, then post 301 with
 *&       BAPI_GOODSMVT_CREATE (one document per input line, one ITEM per
-*&       issuing storage location) + BAPI_TRANSACTION_COMMIT.
+*&       issuing storage location) + BAPI_TRANSACTION_COMMIT. Each item
+*&       is received in the storage location of the same code in the
+*&       target plant, which must exist there (T001L). The allocation
+*&       and this check run before batch creation.
 *&   4.  Historize every record in ZLOT_MOV_EXEC (one row per line and
 *&       issuing storage location).
 *&
@@ -145,6 +148,19 @@
 *&      [25] Performance: MBEW of the target plant buffered once; MCHB
 *&           filtered on CLABS > 0 in the database; sorted look-up table
 *&           for the NO_BATCH stock check.
+*& v0.4  Receiving storage location:
+*&      [26] Each 301 item is received in the storage location with the
+*&           same code as its issuing location (MOVE_STLOC = STGE_LOC),
+*&           plant 8P01 -> 8Q01. P_LGDST is no longer used for posting;
+*&           it is optional and, when filled, only checked against
+*&           T001L. ZLOT_MOV_EXEC-LGORT_DST holds the actual receiving
+*&           location, blank for a line that posted nothing.
+*&      [27] Every allocated storage location must exist in the target
+*&           plant (T001L, buffered once): otherwise the line is blocked
+*&           with ZHBM 023 and nothing is posted. The allocation and this
+*&           check now run BEFORE batch creation, so no batch is created
+*&           in the target plant for a line that cannot be posted; if
+*&           batch creation fails, the allocated stock is given back.
 *&---------------------------------------------------------------------*
 REPORT zhbm_split_val_ph1 LINE-SIZE 200.
 
@@ -487,13 +503,16 @@ DATA: gt_input_raw TYPE tt_input_raw,
       gv_run_mode  TYPE c,
       gv_posnr     TYPE numc6.
 
+* storage locations of the target plant (T001L), buffered once [v0.4-27]
+DATA: gt_lgort_dst TYPE SORTED TABLE OF lgort_d WITH UNIQUE KEY table_line.
+
 *&---------------------------------------------------------------------*
 *&  Selection screen
 *&---------------------------------------------------------------------*
 SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-b01.
   PARAMETERS: p_wsrc TYPE werks_d OBLIGATORY DEFAULT '8P01',   " source plant
               p_wdst TYPE werks_d OBLIGATORY DEFAULT '8Q01',    " target plant
-              p_lgdst TYPE lgort_d.        " receiving stor.loc. (checked on execution) [v0.3-23]
+              p_lgdst TYPE lgort_d.        " optional, T001L check only; not posted [v0.4-26]
   SELECT-OPTIONS: s_matnr FOR gt_stock-matnr,                   " optional filter
                   s_charg FOR gt_stock-charg,
                   s_mtart FOR gt_marc-mtart.                    " material type
@@ -594,18 +613,18 @@ AT SELECTION-SCREEN.
 
 * --- mandatory on execution (not OBLIGATORY: the delete path needs
 *     neither)                                                [v0.3-23]
-  IF p_lgdst IS INITIAL.
-    MESSAGE 'Receiving storage location is required' TYPE 'E'.
-  ENDIF.
   IF p_budat IS INITIAL.
     MESSAGE 'Posting date is required' TYPE 'E'.
   ENDIF.
 
-* --- receiving storage location ---------------------------------------
-  SELECT SINGLE lgort FROM t001l INTO @DATA(lv_l)
-    WHERE werks = @p_wdst AND lgort = @p_lgdst.
-  IF sy-subrc <> 0.
-    MESSAGE |Storage location { p_lgdst } does not exist in plant { p_wdst } (T001L)| TYPE 'E'.
+* --- receiving storage location: optional, not used for posting since
+*     each item is received in the same storage-location code   [v0.4-26]
+  IF p_lgdst IS NOT INITIAL.
+    SELECT SINGLE lgort FROM t001l INTO @DATA(lv_l)
+      WHERE werks = @p_wdst AND lgort = @p_lgdst.
+    IF sy-subrc <> 0.
+      MESSAGE |Storage location { p_lgdst } does not exist in plant { p_wdst } (T001L)| TYPE 'E'.
+    ENDIF.
   ENDIF.
 
 * --- separator --------------------------------------------------------
@@ -660,8 +679,8 @@ START-OF-SELECTION.
 
 * Also enforced here: a background job does not pass the screen
 * checks of AT SELECTION-SCREEN.                             [v0.3-23]
-  IF p_lgdst IS INITIAL OR p_budat IS INITIAL.
-    MESSAGE 'Receiving storage location and posting date are required' TYPE 'E'.
+  IF p_budat IS INITIAL.
+    MESSAGE 'Posting date is required' TYPE 'E'.
   ENDIF.
 
   PERFORM f_init.
@@ -711,7 +730,11 @@ END-OF-SELECTION.
 *&---------------------------------------------------------------------*
 FORM f_init.
 
-  CLEAR: gt_out, gt_mov_log, gv_posnr.
+  CLEAR: gt_out, gt_mov_log, gv_posnr, gt_lgort_dst.
+
+* storage locations of the target plant                     [v0.4-27]
+  SELECT lgort FROM t001l INTO TABLE @gt_lgort_dst
+    WHERE werks = @p_wdst.
 
   gv_run_mode = COND #( WHEN p_dir = abap_true THEN gc_mode_dir
                                                ELSE gc_mode_full ).
@@ -737,7 +760,7 @@ FORM f_init.
   WRITE: / 'RUN_ID:', gv_run_id, 'Seq:', gv_run_seq,
            'Mode:', COND string( WHEN gv_run_mode = gc_mode_dir
                                  THEN 'DIRECT' ELSE 'FULL' ).
-  WRITE: / 'Transfer:', p_wsrc, '->', p_wdst, '/', p_lgdst,
+  WRITE: / 'Transfer:', p_wsrc, '->', p_wdst, '(same storage location codes)',
            'Posting date:', p_budat.
   IF p_test = abap_true.
     WRITE: / '*** SIMULATION (TESTRUN) - no posting ***' COLOR COL_TOTAL.
@@ -1659,7 +1682,8 @@ FORM f_process_lines.
         lv_split TYPE abap_bool,
         lv_vt    TYPE bwtar_d,
         lv_cerr  TYPE abap_bool,
-        lv_cmsg  TYPE bapi_msg.
+        lv_cmsg  TYPE bapi_msg,
+        lv_lgmis TYPE lgort_d.                          " [v0.4-27]
 
 * memorised batch-extension result per MATNR + CHARG          [v0.2 - 6]
   DATA: lt_done TYPE tt_done,
@@ -1750,6 +1774,40 @@ FORM f_process_lines.
                                             iv_bwkey = p_wdst ).
     lv_vt = COND #( WHEN lv_split = abap_true THEN ls_raw-bwtar ELSE space ).
 
+*   --- 3.6a Allocation of the issuing storage locations --------------
+*   Runs before batch creation, so no batch is created in the target
+*   plant for a line that cannot be posted.                 [v0.4-27]
+    PERFORM f_allocate_lgort USING ls_raw-matnr ls_raw-charg ls_raw-menge
+                             CHANGING lt_alloc lv_aok lv_avail.
+    IF lv_aok = abap_false.
+      ls_out-status  = gc_st_err.
+      ls_out-message = |Cannot allocate { ls_raw-menge } { ls_raw-meins } to storage | &&
+                       |locations of plant { p_wsrc }: { lv_avail } still available|.
+      PERFORM f_add_log USING gc_msgid '005' 'E' CHANGING ls_out.
+      CONTINUE.
+    ENDIF.
+
+*   --- 3.6a' Receiving storage locations exist in the target plant ----
+*   Each item is received in the same storage-location code.  [v0.4-27]
+    CLEAR lv_lgmis.
+    LOOP AT lt_alloc INTO ls_alloc.
+      READ TABLE gt_lgort_dst TRANSPORTING NO FIELDS
+           WITH TABLE KEY table_line = ls_alloc-lgort.
+      IF sy-subrc <> 0.
+        lv_lgmis = ls_alloc-lgort.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+    IF lv_lgmis IS NOT INITIAL.
+      ls_out-status    = gc_st_err.
+      ls_out-lgort_src = lv_lgmis.
+      ls_out-message   = |Storage location { lv_lgmis } does not exist in plant | &&
+                         |{ p_wdst } - line not transferred|.
+      PERFORM f_add_log USING gc_msgid '023' 'E' CHANGING ls_out.
+      CONTINUE.
+    ENDIF.
+    PERFORM f_consume_alloc USING lt_alloc ls_raw-matnr ls_raw-charg gc_take.
+
 *   Write the rows pending so far before any BAPI call: a ROLLBACK WORK
 *   after a failed BAPI must not discard them.              [v0.3-20]
     PERFORM f_flush_logs CHANGING lv_cerr lv_cmsg.
@@ -1775,21 +1833,11 @@ FORM f_process_lines.
         ls_out-status  = gc_st_err.
         ls_out-message = |Batch extension failed - transfer skipped. { ls_done-msg }|.
         PERFORM f_add_log USING ls_done-id ls_done-no ls_done-ty CHANGING ls_out.
+*       the allocated stock is available again for another line [v0.4-27]
+        PERFORM f_consume_alloc USING lt_alloc ls_raw-matnr ls_raw-charg gc_back.
         CONTINUE.
       ENDIF.
     ENDIF.
-
-*   --- 3.6a Allocation of the issuing storage locations --------------
-    PERFORM f_allocate_lgort USING ls_raw-matnr ls_raw-charg ls_raw-menge
-                             CHANGING lt_alloc lv_aok lv_avail.
-    IF lv_aok = abap_false.
-      ls_out-status  = gc_st_err.
-      ls_out-message = |Cannot allocate { ls_raw-menge } { ls_raw-meins } to storage | &&
-                       |locations of plant { p_wsrc }: { lv_avail } still available|.
-      PERFORM f_add_log USING gc_msgid '005' 'E' CHANGING ls_out.
-      CONTINUE.
-    ENDIF.
-    PERFORM f_consume_alloc USING lt_alloc ls_raw-matnr ls_raw-charg gc_take.
 
 *   --- 3.6b Post 301 (one document, one item per issuing LGORT) ------
     PERFORM f_post_301 USING ls_raw lt_alloc lv_vt
@@ -1817,6 +1865,7 @@ FORM f_process_lines.
 *   one log row per issuing storage location
     LOOP AT lt_alloc INTO ls_alloc.
       ls_out-lgort_src  = ls_alloc-lgort.
+      ls_out-lgort_dst  = ls_alloc-lgort.      " same code in target plant [v0.4-26]
       ls_out-menge_post = ls_alloc-menge.
       PERFORM f_add_log USING lv_id lv_no lv_ty CHANGING ls_out.
     ENDLOOP.
@@ -1959,7 +2008,9 @@ ENDFORM.
 *&      Form  F_POST_301   (3.6 BAPI_GOODSMVT_CREATE)
 *&      One material document per input line, one ITEM per issuing
 *&      storage location. STGE_LOC = issuing location from the
-*&      allocation, MOVE_STLOC = P_LGDST.                     [v0.2 - 1]
+*&      allocation.                                          [v0.2 - 1]
+*&      MOVE_STLOC = the same storage-location code in the target
+*&      plant (was P_LGDST up to v0.3).                       [v0.4-26]
 *&      The target valuation type goes in MOVE_VAL_TYPE (receiving
 *&      side); VAL_TYPE (issuing side) stays blank.          [v0.3-15]
 *&      No COMMIT here: the caller writes the log rows and commits them
@@ -2003,7 +2054,7 @@ FORM f_post_301 USING is_raw   TYPE ty_input_raw
     ls_item-entry_qnt  = ls_alloc-menge.
     ls_item-entry_uom  = is_raw-meins.
     ls_item-move_plant = p_wdst.
-    ls_item-move_stloc = p_lgdst.             " receiving storage location
+    ls_item-move_stloc = ls_alloc-lgort.      " same code in target plant [v0.4-26]
 *   receiving valuation type; the issuing side (VAL_TYPE) stays blank,
 *   the source plant is not split-valuated              [v0.3-15, 18]
     ls_item-move_val_type = iv_bwtar.
@@ -2077,7 +2128,8 @@ FORM f_add_log USING iv_id  TYPE symsgid
   cs_out-testrun   = p_test.
   cs_out-werks_src = p_wsrc.
   cs_out-werks_dst = p_wdst.
-  cs_out-lgort_dst = p_lgdst.
+* LGORT_DST = actual receiving location, blank when nothing was
+* allocated (P_LGDST is not used for posting)                [v0.4-26]
   cs_out-msgty     = iv_ty.
   cs_out-msgid     = iv_id.
   cs_out-msgno     = iv_no.
@@ -2094,7 +2146,7 @@ FORM f_add_log USING iv_id  TYPE symsgid
   ls_log-werks_src = p_wsrc.
   ls_log-werks_dst = p_wdst.
   ls_log-lgort_src = cs_out-lgort_src.
-  ls_log-lgort_dst = p_lgdst.
+  ls_log-lgort_dst = cs_out-lgort_dst.
   ls_log-bwart     = gc_mov_type.
   ls_log-budat     = p_budat.
   ls_log-menge     = COND #( WHEN cs_out-menge_post IS NOT INITIAL

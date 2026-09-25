@@ -1,23 +1,35 @@
-# ZHBM_SPLIT_VAL_PH1 — HBM Split Valuation, Phase 1 (program v0.3)
+# ZHBM_SPLIT_VAL_PH1 — HBM Split Valuation, Phase 1 (program v0.4)
 
 Inter-plant transfer (mvt 301) of **unrestricted** stock from source plant **8P01** to the
 new Split-Valuation plant **8Q01**. Both plants are defaults on the selection screen and stay
 obligatory and validated against T001W. Handles **both batch-managed and non-batch-managed** materials.
 Mapping and quantities come from the HBM Valuation Type Input File. Implements
-`FSD_TSD_HBM_SplitValuation_Phase1_ZHBM_SPLIT_VAL_PH1 v0.3` (which consolidates the earlier
+`FSD_TSD_HBM_SplitValuation_Phase1_ZHBM_SPLIT_VAL_PH1 v0.4` (which consolidates the earlier
 `Sfd_0001_0002_Out_In_V02`).
 
 ## Files
+This repository holds the code only; version history is kept in git (the former
+`*_v0.1_backup` / `*_v0.2_backup` copies are no longer needed).
+
 - `ZHBM_SPLIT_VAL_PH1.abap` — executable report (SE38). Its header block carries a numbered
   change log of every correction applied.
-- `ZHBM_DDIC_TABLES.txt` — SE11 tables, data elements, and message class ZHBM (002–022).
+- `ZHBM_DDIC_TABLES.txt` — SE11 tables, data elements, and message class ZHBM (002–023).
 - `ZHBM_SPLIT_VAL_PH1_README.md` — this file, the technical documentation.
-- `Functional Specifications/FSD_TSD_HBM_SplitValuation_Phase1_ZHBM_SPLIT_VAL_PH1_v0.3.docx`
-  — the combined functional and technical specification, the document that is signed off.
-- `Functional Specifications/Sfd_0001_0002_Out_In_V02.docx` — HBM's original functional
-  specification, superseded by the FSD and deliberately left unchanged.
-- `*_v0.1_backup.*` — the state of each file before the specification cross-check.
-- `*_v0.2_backup.*` — the state of each file before the v0.3 code-review corrections.
+
+The specifications live in the project document folder
+`HBM-Wricefs Stocks & Batches Migration Program/`, outside this repository:
+- `Sfd Tsd/FSD_TSD_HBM_SplitValuation_Phase1_ZHBM_SPLIT_VAL_PH1_v0.4.docx` — the combined
+  functional and technical specification, the document that is signed off (v0.1–v0.3 kept
+  alongside as history).
+- `Sfd Tsd/Sfd_0001_0002_Out_In_V02.docx` — HBM's original functional specification,
+  superseded by the FSD and deliberately left unchanged.
+- `Template Seu/WRICEF_FSD_TSD_Template_v1.0_BLANK.docx` — the WRICEF FSD/TSD template.
+
+## What changed in v0.4 (receiving storage location)
+| # | Change | Why |
+|---|---|---|
+| 26 | Each 301 item is received in the storage location with the **same code** as its issuing location (`MOVE_STLOC = STGE_LOC`). `P_LGDST` is optional, only checked against `T001L` when filled, and not used for posting. `LGORT_DST` in the log is the actual receiving location (blank when nothing was posted) | Migration rule: stock keeps its storage location, only the plant changes |
+| 27 | Every allocated storage location must exist in the target plant (`T001L`, buffered once), else the line is blocked with `ZHBM 023`. Allocation and this check now run **before** batch creation; if batch creation fails the allocated stock is given back | The error is caught in validation and in simulation, not by the BAPI at posting time, and no batch is created in 8Q01 for a line that cannot be posted |
 
 ## What changed in v0.3 (code review)
 | # | Change | Why |
@@ -58,7 +70,7 @@ Mapping and quantities come from the HBM Valuation Type Input File. Implements
 |------|------|
 | P_WSRC | Source plant |
 | P_WDST | Target plant (new) |
-| P_LGDST | Receiving storage location |
+| P_LGDST | Receiving storage location (optional, not used for posting) |
 | S_MATNR | Material |
 | S_CHARG | Batch |
 | S_MTART | Material type |
@@ -120,13 +132,22 @@ Per-field rejections: `MATNR`/`BWTAR` missing → `009`; quantity non-numeric �
 locations come from the stock, the rest from the selection screen, and the movement type is
 always 301 — so adding a column changes nothing without a code change.
 
-## Storage locations (v0.2)
+## Storage locations (v0.2, receiving side v0.4)
 The input file carries no storage location. Stock is read **per `LGORT`** (`MCHB` / `MARD`)
 and each input line is allocated over the issuing storage locations that hold the stock,
 **largest remaining first**, from a pool shared by all valuation-type lines of the same
 Material+Batch — so the same quantity is never issued twice. One material document is posted
-per input line, with **one item per issuing storage location** (`STGE_LOC`), all received
-into `P_LGDST` (`MOVE_STLOC`). One `ZLOT_MOV_EXEC` row is written per item.
+per input line, with **one item per issuing storage location** (`STGE_LOC`).
+
+**Receiving storage location (v0.4).** For this migration the receiving storage location in
+the target plant has the same code as the issuing one in the source plant: each item is
+posted with `MOVE_STLOC = STGE_LOC` (same `LGORT` code on both sides, only the plant differs).
+Every allocated storage location must therefore exist in 8Q01 (`T001L`); if one is missing
+the line is blocked with status `E` / `ZHBM 023` and nothing is posted. This check runs
+right after the allocation and before batch creation, so it also shows up in a simulation
+run. `P_LGDST` is optional: when filled it is only checked against `T001L`.
+
+One `ZLOT_MOV_EXEC` row is written per item.
 
 If the line cannot be covered by the remaining stock, nothing is posted and the record is
 logged with status `E` / `ZHBM 005` — a partial issue is never performed.
@@ -155,7 +176,9 @@ logged with status `E` / `ZHBM 005` — a partial issue is never performed.
 - **3.6 Stock transfer** — storage-location allocation, then `BAPI_GOODSMVT_CREATE`
   (mvt 301, GM code 04) + commit; one document per input line, one item per issuing storage
   location; batch fields filled only when applicable; target valuation type in
-  `MOVE_VAL_TYPE`. Posting date from `P_BUDAT`. The document and its log rows are committed
+  `MOVE_VAL_TYPE`; receiving `MOVE_STLOC` uses the same `LGORT` code as the issuing side
+  for each item, which must exist in the target plant (`ZHBM 023`, checked before batch
+  creation). Posting date from `P_BUDAT`. The document and its log rows are committed
   in the same LUW.
 - **4. Logging** — every record written to `ZLOT_MOV_EXEC` (RUN_ID, sequence, mode, testrun,
   material/batch, plants, storage locations, BWTAR, qty, posting date, doc/year, status,
@@ -210,7 +233,7 @@ An input line whose Material+Batch has no unrestricted stock in the source plant
 as `ZHBM 006`, not as a quantity mismatch.
 
 The selection screen checks both plants against `T001W`, refuses source = target, checks
-`P_LGDST` against `T001L`, requires a separator, and verifies that the input file is
+`P_LGDST` against `T001L` when it is filled, requires a separator, and verifies that the input file is
 readable before the run starts.
 
 ## Execution modes (sec.5)
@@ -262,8 +285,9 @@ documents (status `S`, not a test run): the log of real postings is the audit tr
   numbers).
 - Authorization: the posting BAPIs run their own checks; `P_DEL` checks `S_TABU_NAM`. A
   report-level check (e.g. `S_TCODE` / a custom object) to be added per your security model.
-- One receiving storage location for the whole run (`P_LGDST`). If the target plant needs
-  several, add `LGORT` to the input file and key the allocation on it.
+- Receiving storage location = issuing storage-location code (v0.4). 8Q01 must be created
+  with the same storage locations as 8P01 (at least those holding stock); run a simulation
+  first — any gap shows as `ZHBM 023`.
 - Allocation rule largest-first; pro rata would split a line across more items and can
   introduce rounding on UoM with decimals.
 - Placeholder list for the batch column (`GC_DUMMY_BATCH`) to be confirmed against the actual

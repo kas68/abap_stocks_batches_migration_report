@@ -1,7 +1,7 @@
 ********************************************************************************
 * HBM - Phase 1 : Batch Stock Transfer to New Plant (Split Valuation)
-* Spec: FSD_TSD_HBM_SplitValuation_Phase1_ZHBM_SPLIT_VAL_PH1 v0.3
-* Program version: v0.3 (messages 016-022 added, no table change)
+* Spec: FSD_TSD_HBM_SplitValuation_Phase1_ZHBM_SPLIT_VAL_PH1 v0.4
+* Program version: v0.4 (message 023 added, no table change)
 * DDIC objects to create in SE11 BEFORE activating ZHBM_SPLIT_VAL_PH1
 ********************************************************************************
 * Log tables:
@@ -52,6 +52,8 @@ WERKS_SRC          WERKS_D               Source plant (8P01)
 WERKS_DST          WERKS_D               Target plant
 LGORT_SRC          LGORT_D               Issuing storage location  [v0.2]
 LGORT_DST          LGORT_D               Receiving storage location [v0.2]
+                                         (= issuing LGORT code, blank if
+                                          nothing posted)          [v0.4]
 BWART              BWART                 Movement type (301)
 BUDAT              BUDAT                 Posting date of the movement [v0.2]
 MENGE              MENGE_D               Quantity posted on this line
@@ -127,6 +129,8 @@ MESSAGE CLASS  ZHBM  (SE91) - used by the program
                                                                     [v0.3]
 020  Source batch &1 cannot be read in plant &2                     [v0.3]
 022  Update failed after commit - document &1 not posted            [v0.3]
+023  Storage location &1 does not exist in plant &2 - line not
+     transferred                                                    [v0.4]
 (The program currently passes free text in MSGTX; message-class entries are
  recommended so MSGID/MSGNO are meaningful for reporting.)
 ********************************************************************************
