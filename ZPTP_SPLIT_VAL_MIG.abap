@@ -1,19 +1,21 @@
 *&---------------------------------------------------------------------*
-*& Report  ZHBM_SPLIT_VAL_PH1
+*& Report  ZPTP_SPLIT_VAL_MIG
 *&---------------------------------------------------------------------*
 *& Project : HBM - Split Valuation migration
-*& Phase   : 1 - Clearing of batch stocks / Inter-plant transfer
-*& Spec    : FSD_TSD_HBM_SplitValuation_Phase1_ZHBM_SPLIT_VAL_PH1 v0.4
-*&           (supersedes Sfd_0001_0002_Out_In_V02)
-*& Version : v0.4 (see change log)
+*& Scope   : Clearing of batch stocks / Inter-plant transfer
+*& Version : v0.5
+*& Package : ZPTP_SPLIT_VAL        Message class: ZPTP_SPLIT_VAL
 *&
-*& Purpose : Transfer unrestricted stock of batch-managed AND non-batch
-*&           materials from source plant 8P01 to a newly created plant
-*&           where Split Valuation is active, using movement type 301.
-*&           Quantities and the material/batch/valuation-type mapping come
-*&           from the HBM Valuation Type Input File.
+*&---------------------------------------------------------------------*
+*& Description
+*&---------------------------------------------------------------------*
+*& Transfer unrestricted stock of batch-managed AND non-batch materials
+*& from source plant 8P01 to a newly created plant where Split Valuation
+*& is active, using movement type 301. Quantities and the
+*& material/batch/valuation-type mapping come from the HBM Valuation Type
+*& Input File.
 *&
-*& Processing (per FSD v0.4):
+*& Processing:
 *&   3.1 Read SAP stock in 8P01 (unrestricted only), PER STORAGE LOCATION;
 *&       flag batch mgmt.
 *&   3.2 Presence in input file. Material/batch in SAP but NOT in file:
@@ -34,7 +36,7 @@
 *&       is received in the storage location of the same code in the
 *&       target plant, which must exist there (T001L). The allocation
 *&       and this check run before batch creation.
-*&   4.  Historize every record in ZLOT_MOV_EXEC (one row per line and
+*&   4.  Historize every record in ZPTP_MOV_EXEC (one row per line and
 *&       issuing storage location).
 *&
 *& Execution strategies (sec.5):
@@ -48,121 +50,37 @@
 *& Maintenance (sec.5): P_DEL deletes a RUN_ID from the Z tables only.
 *&
 *&---------------------------------------------------------------------*
-*& Change log
+*& Context
 *&---------------------------------------------------------------------*
-*& v0.1  Initial version.
-*& v0.2  Corrections raised by the FSD / source cross-check:
-*&       [1] Storage location. Stock is now read per LGORT; an input line
-*&           is allocated across the issuing storage locations that hold
-*&           the stock (largest remaining first) and STGE_LOC /
-*&           MOVE_STLOC are populated. Receiving location = P_LGDST.
-*&           Without this the 301 posting could never succeed.
-*&       [2] Selection-screen validations added (T001W, source <> target,
-*&           T001L, separator, server file readable).
-*&       [3] F_CHECK_SAP_NOT_IN_FILE is skipped when reprocessing error
-*&           lines only; it previously re-logged every untouched stock
-*&           record as I / X on each restart.
-*&       [4] F_LOAD_PREV_ERRORS uses SELECT DISTINCT (duplicate keys
-*&           dumped on the sorted unique table) and warns when the
-*&           previous sequence holds status I records, which a
-*&           reprocess-errors-only run cannot pick up.
-*&       [5] Malformed, non-numeric and negative input lines are now
-*&           rejected with status E and logged instead of being dropped
-*&           silently.
-*&       [6] Batch-extension failure message is memorised per
-*&           material/batch, so every line of the same batch logs the
-*&           BAPI message.
-*&       [7] New check: input line with no unrestricted stock in the
-*&           source plant reports ZHBM 006 instead of a misleading
-*&           quantity-mismatch (ZHBM 004).
-*&       [8] Posting date is a selection-screen parameter (P_BUDAT).
-*&       [9] ALV now mirrors ZLOT_MOV_EXEC (run, plants, locations,
-*&           message keys) as specified in FSD 4.4.2.
-*&      [14] Default value 8Q01 for the target plant (P_WDST). It stays
-*&           obligatory and is still checked against T001W and against
-*&           the source plant, so the default is a convenience only.
-*&      [13] Material type added to the selection screen (S_MTART).
-*&           It restricts the stock selection and the input file to the
-*&           material types chosen. MARC is still read without that
-*&           restriction, so that a material left out by the type can
-*&           be told apart from one not extended to the plant.
-*&      [12] The NO_BATCH declaration is verified three ways, so that
-*&           "not batch-managed" is established and not assumed:
-*&           the plant indicator MARC-XCHPF of BOTH plants, the
-*&           client-level indicator MARA-XCHPF, and the absence of
-*&           unrestricted batch stock in MCHB for the source plant
-*&           (ZHBM 015). The last one catches a material whose batch
-*&           indicator was removed after batches had been created.
-*&      [11] NO_BATCH is a declared value of the input file, not a
-*&           placeholder: it states that the material is not
-*&           batch-managed in the source plant nor in the target plant.
-*&           The declaration is verified against MARC-XCHPF of BOTH
-*&           plants (ZHBM 013) and against the extension of the material
-*&           to the target plant (ZHBM 014); no batch is created and the
-*&           301 carries the valuation type only. Such a line raises no
-*&           ZHBM 012 warning, since it follows the convention.
-*&      [10] Batch field normalisation. A placeholder value such as
-*&           NO_BATCH in the batch column of the input file is reduced
-*&           to blank, and any batch value is cleared for a material
-*&           that is not batch-managed (MARC-XCHPF). Without this the
-*&           file key never matches the stock key: the line was blocked
-*&           with ZHBM 006 and the corresponding stock was reported as
-*&           inconsistent (ZHBM 010), for every non-batch material.
-*& v0.3  Corrections raised by the code review:
-*&      [15] Receiving valuation type. The target valuation type is now
-*&           passed in MOVE_VAL_TYPE (receiving side); VAL_TYPE (issuing
-*&           side) stays blank, since the source plant is not
-*&           split-valuated.
-*&      [16] One valuation type per batch. With split valuation a batch
-*&           carries a single valuation type (MCHA-BWTAR). A Material +
-*&           Batch split over several valuation types in the input file
-*&           is rejected (ZHBM 016); a batch that already exists in the
-*&           target plant with another valuation type blocks the line
-*&           (ZHBM 019).
-*&      [17] Batch creation copies the attributes of the source batch
-*&           (BAPI_BATCH_GET_DETAIL: expiry date, production date, vendor
-*&           batch, ...) and sets the target valuation type. RETURN of
-*&           BAPI_BATCH_CREATE is a TABLES parameter. An unreadable
-*&           source batch blocks the line (ZHBM 020).
-*&      [18] Direct Transfer Mode: the valuation type is posted only when
-*&           the material is split-valuated in the target plant
-*&           (MBEW-BWTTY); otherwise the 301 is posted without it and the
-*&           record says so.
-*&      [19] Unit of measure: the file unit is converted to the internal
-*&           unit (CONVERSION_EXIT_CUNIT_INPUT, e.g. PC -> ST; ZHBM 017)
-*&           and must equal the base unit of the material (ZHBM 018). A
-*&           blank unit is read as the base unit.
-*&      [20] Logs are persisted in the same LUW as each posting: pending
-*&           rows are written before any BAPI call, and the rows of a
-*&           posted document are committed with it. A failed update after
-*&           the commit is written back to the log (ZHBM 022). The number
-*&           of rows inserted is checked.
-*&      [21] Simulation calls BAPI_GOODSMVT_CREATE with TESTRUN = 'X'
-*&           followed by a rollback, so the posting itself is checked.
-*&      [22] P_DEL: authorization check (S_TABU_NAM) and refusal when the
-*&           RUN_ID holds posted material documents.
-*&      [23] Selection-screen checks run on execution only (not on the
-*&           radio-button switch). P_LGDST and P_BUDAT are checked there
-*&           instead of OBLIGATORY, so the delete path needs neither.
-*&      [24] CONVERSION_EXIT_MATN1_INPUT exceptions caught (ZHBM 009).
-*&      [25] Performance: MBEW of the target plant buffered once; MCHB
-*&           filtered on CLABS > 0 in the database; sorted look-up table
-*&           for the NO_BATCH stock check.
-*& v0.4  Receiving storage location:
-*&      [26] Each 301 item is received in the storage location with the
-*&           same code as its issuing location (MOVE_STLOC = STGE_LOC),
-*&           plant 8P01 -> 8Q01. P_LGDST is no longer used for posting;
-*&           it is optional and, when filled, only checked against
-*&           T001L. ZLOT_MOV_EXEC-LGORT_DST holds the actual receiving
-*&           location, blank for a line that posted nothing.
-*&      [27] Every allocated storage location must exist in the target
-*&           plant (T001L, buffered once): otherwise the line is blocked
-*&           with ZHBM 023 and nothing is posted. The allocation and this
-*&           check now run BEFORE batch creation, so no batch is created
-*&           in the target plant for a line that cannot be posted; if
-*&           batch creation fails, the allocated stock is given back.
+*& One-off migration report, run in simulation first, then for real, by
+*& the migration team. Logs: ZPTP_MOV_EXEC (one row per record and
+*& issuing storage location), ZPTP_BATCH_EXT (batch extensions). Postings
+*& through BAPI_GOODSMVT_CREATE (GM code 04), batches through
+*& BAPI_BATCH_CREATE.
+*&
 *&---------------------------------------------------------------------*
-REPORT zhbm_split_val_ph1 LINE-SIZE 200.
+*& Assumptions
+*&---------------------------------------------------------------------*
+*& - Valuation level = plant (MBEW-BWKEY = target plant).
+*& - The target plant has the same storage-location codes as the source.
+*& - File quantities are in the material base unit.
+*& - One valuation type per batch.
+*&
+*&---------------------------------------------------------------------*
+*& Design decisions
+*&---------------------------------------------------------------------*
+*& - Storage-location allocation largest-first (pro rata to be confirmed).
+*& - Logs committed in the same LUW as each posting.
+*& - Allocation and the target storage-location check run before batch
+*&   creation, so no batch is created for a line that cannot be posted.
+*&
+*&---------------------------------------------------------------------*
+*& Related developments
+*&---------------------------------------------------------------------*
+*& DDIC objects and message class: ZPTP_SPLIT_VAL_DDIC.txt.
+*&
+*&---------------------------------------------------------------------*
+REPORT zptp_split_val_mig LINE-SIZE 200.
 
 TYPE-POOLS: abap, slis.
 
@@ -173,7 +91,7 @@ CONSTANTS:
   gc_mov_type   TYPE bwart      VALUE '301',
   gc_gm_code    TYPE bapi2017_gm_code-gm_code VALUE '04',   " MB1B transfer
   gc_xchpf      TYPE marc-xchpf VALUE 'X',
-  gc_msgid      TYPE symsgid    VALUE 'ZHBM',
+  gc_msgid      TYPE symsgid    VALUE 'ZPTP_SPLIT_VAL',
 * run mode
   gc_mode_full  TYPE c VALUE 'F',
   gc_mode_dir   TYPE c VALUE 'D',
@@ -192,7 +110,7 @@ CONSTANTS:
   gc_back       TYPE i VALUE 1.
 
 * Placeholder values accepted in the batch column of the input file and
-* reduced to blank. The specification asks for a blank batch on a
+* reduced to blank. The requirement is a blank batch on a
 * non-batch-managed material; these tokens are tolerated because the
 * extracts produced outside SAP commonly carry one of them. Extend the
 * list here if HBM delivers another convention.
@@ -205,7 +123,7 @@ CONSTANTS:
 
 * Other values tolerated in the batch column and reduced to blank. These
 * are deviations from the convention, not declarations: they raise the
-* ZHBM 012 warning.
+* ZPTP_SPLIT_VAL 012 warning.
 CONSTANTS:
   gc_dummy_batch TYPE string VALUE 'N/A,NA,NONE,NULL,-,--,#,.'.
 
@@ -213,7 +131,7 @@ CONSTANTS:
 *&  Types
 *&---------------------------------------------------------------------*
 * input file raw record (one physical line)
-TYPES: BEGIN OF ty_input_raw,
+TYPES: BEGIN OF gty_input_raw,
          matnr TYPE matnr,
          charg TYPE charg_d,
          bwtar TYPE bwtar_d,
@@ -224,21 +142,21 @@ TYPES: BEGIN OF ty_input_raw,
          bad   TYPE abap_bool,   " declaration refused, line blocked
          badno TYPE symsgno,     " message number of the refusal
          badtx TYPE bapi_msg,    " message text of the refusal
-       END OF ty_input_raw.
-TYPES: tt_input_raw TYPE STANDARD TABLE OF ty_input_raw WITH DEFAULT KEY.
+       END OF gty_input_raw.
+TYPES: gtt_input_raw TYPE STANDARD TABLE OF gty_input_raw WITH DEFAULT KEY.
 
 * input file aggregated per MATNR + CHARG (for quantity validation)
-TYPES: BEGIN OF ty_input_sum,
+TYPES: BEGIN OF gty_input_sum,
          matnr TYPE matnr,
          charg TYPE charg_d,
          menge TYPE menge_d,
          meins TYPE meins,
-       END OF ty_input_sum.
-TYPES: tt_input_sum TYPE SORTED TABLE OF ty_input_sum
+       END OF gty_input_sum.
+TYPES: gtt_input_sum TYPE SORTED TABLE OF gty_input_sum
                     WITH UNIQUE KEY matnr charg.
 
 * material master buffer: batch-management flag and base unit
-TYPES: BEGIN OF ty_marc,
+TYPES: BEGIN OF gty_marc,
          matnr    TYPE matnr,
          werks    TYPE werks_d,
          mtart    TYPE mtart,      " MARA-MTART, material type
@@ -246,72 +164,72 @@ TYPES: BEGIN OF ty_marc,
          xchpf_cl TYPE xchpf,      " MARA-XCHPF, client level
          meins    TYPE meins,
          batchmgd TYPE abap_bool,  " derived: batch-managed in that plant
-       END OF ty_marc.
-TYPES: tt_marc TYPE SORTED TABLE OF ty_marc WITH UNIQUE KEY matnr werks.
+       END OF gty_marc.
+TYPES: gtt_marc TYPE SORTED TABLE OF gty_marc WITH UNIQUE KEY matnr werks.
 
 * materials whose NO_BATCH declaration was refused: their stock must not
 * be reported a second time by the reconciliation
-TYPES: tt_matnr TYPE SORTED TABLE OF matnr WITH UNIQUE KEY table_line.
+TYPES: gtt_matnr TYPE SORTED TABLE OF matnr WITH UNIQUE KEY table_line.
 
 * Material + Batch keys blocked by a line-level check (unit of measure,
 * several valuation types for one batch): their stock must not be
 * reported again by the reconciliation                         [v0.3-16]
-TYPES: BEGIN OF ty_badkey,
+TYPES: BEGIN OF gty_badkey,
          matnr TYPE matnr,
          charg TYPE charg_d,
-       END OF ty_badkey.
-TYPES: tt_badkey TYPE SORTED TABLE OF ty_badkey WITH UNIQUE KEY matnr charg.
+       END OF gty_badkey.
+TYPES: gtt_badkey TYPE SORTED TABLE OF gty_badkey WITH UNIQUE KEY matnr charg.
 
 * valuation segments of the target plant, buffered once       [v0.3-25]
-TYPES: BEGIN OF ty_mbew,
+TYPES: BEGIN OF gty_mbew,
          matnr TYPE matnr,
          bwtar TYPE bwtar_d,
          bwtty TYPE bwtty_d,      " valuation category (header row)
-       END OF ty_mbew.
-TYPES: tt_mbew TYPE SORTED TABLE OF ty_mbew WITH UNIQUE KEY matnr bwtar.
+       END OF gty_mbew.
+TYPES: gtt_mbew TYPE SORTED TABLE OF gty_mbew WITH UNIQUE KEY matnr bwtar.
 
 * SAP unrestricted stock per MATNR + CHARG (+ batch-mgmt flag), all LGORT
-TYPES: BEGIN OF ty_stock,
+TYPES: BEGIN OF gty_stock,
          matnr TYPE matnr,
          charg TYPE charg_d,
          werks TYPE werks_d,
          xchpf TYPE xchpf,
          menge TYPE menge_d,
          meins TYPE meins,
-       END OF ty_stock.
-TYPES: tt_stock TYPE SORTED TABLE OF ty_stock
+       END OF gty_stock.
+TYPES: gtt_stock TYPE SORTED TABLE OF gty_stock
                WITH UNIQUE KEY matnr charg.
 
 * SAP unrestricted stock per MATNR + CHARG + LGORT (issuing side)
-TYPES: BEGIN OF ty_stock_loc,
+TYPES: BEGIN OF gty_stock_loc,
          matnr TYPE matnr,
          charg TYPE charg_d,
          lgort TYPE lgort_d,
          menge TYPE menge_d,      " stock read
          remng TYPE menge_d,      " remaining, not yet allocated in this run
          meins TYPE meins,
-       END OF ty_stock_loc.
-TYPES: tt_stock_loc TYPE SORTED TABLE OF ty_stock_loc
+       END OF gty_stock_loc.
+TYPES: gtt_stock_loc TYPE SORTED TABLE OF gty_stock_loc
                     WITH UNIQUE KEY matnr charg lgort.
 
 * allocation of one input line over the issuing storage locations
-TYPES: BEGIN OF ty_alloc,
+TYPES: BEGIN OF gty_alloc,
          lgort TYPE lgort_d,
          menge TYPE menge_d,
-       END OF ty_alloc.
-TYPES: tt_alloc TYPE STANDARD TABLE OF ty_alloc WITH DEFAULT KEY.
+       END OF gty_alloc.
+TYPES: gtt_alloc TYPE STANDARD TABLE OF gty_alloc WITH DEFAULT KEY.
 
 * previous-run error keys (for restart of error lines)
-TYPES: BEGIN OF ty_errkey,
+TYPES: BEGIN OF gty_errkey,
          matnr TYPE matnr,
          charg TYPE charg_d,
          bwtar TYPE bwtar_d,
-       END OF ty_errkey.
-TYPES: tt_errkey TYPE SORTED TABLE OF ty_errkey
+       END OF gty_errkey.
+TYPES: gtt_errkey TYPE SORTED TABLE OF gty_errkey
                 WITH UNIQUE KEY matnr charg bwtar.
 
 * memorised batch-extension result for the run
-TYPES: BEGIN OF ty_done,
+TYPES: BEGIN OF gty_done,
          matnr TYPE matnr,
          charg TYPE charg_d,
          ok    TYPE abap_bool,
@@ -319,12 +237,12 @@ TYPES: BEGIN OF ty_done,
          id    TYPE symsgid,
          no    TYPE symsgno,
          ty    TYPE symsgty,
-       END OF ty_done.
-TYPES: tt_done TYPE SORTED TABLE OF ty_done WITH UNIQUE KEY matnr charg.
+       END OF gty_done.
+TYPES: gtt_done TYPE SORTED TABLE OF gty_done WITH UNIQUE KEY matnr charg.
 
-* ALV / output row - mirrors ZLOT_MOV_EXEC (FSD 4.4.2)
-TYPES: BEGIN OF ty_out,
-         run_id     TYPE zlot_run_id,
+* ALV / output row - mirrors ZPTP_MOV_EXEC
+TYPES: BEGIN OF gty_out,
+         run_id     TYPE zdelot_run_id,
          run_seq    TYPE numc3,
          run_mode   TYPE c,
          testrun    TYPE abap_bool,
@@ -349,8 +267,8 @@ TYPES: BEGIN OF ty_out,
          msgno      TYPE symsgno,
          message    TYPE bapi_msg,
          normbat    TYPE abap_bool,   " batch value normalised to blank
-       END OF ty_out.
-TYPES: tt_out TYPE STANDARD TABLE OF ty_out WITH DEFAULT KEY.
+       END OF gty_out.
+TYPES: gtt_out TYPE STANDARD TABLE OF gty_out WITH DEFAULT KEY.
 
 *&---------------------------------------------------------------------*
 *&  Local helper class (valuation-segment existence check)
@@ -359,7 +277,7 @@ TYPES: tt_out TYPE STANDARD TABLE OF ty_out WITH DEFAULT KEY.
 *&---------------------------------------------------------------------*
 CLASS lcl_help DEFINITION.
   PUBLIC SECTION.
-    CLASS-METHODS seg_exists
+    CLASS-METHODS is_segment_created
       IMPORTING iv_matnr TYPE matnr
                 iv_bwkey TYPE bwkey
                 iv_bwtar TYPE bwtar_d OPTIONAL
@@ -376,7 +294,7 @@ CLASS lcl_help DEFINITION.
 *   Buffers the valuation segments of one valuation area   [v0.3-25]
     CLASS-METHODS load_mbew
       IMPORTING iv_bwkey TYPE bwkey
-                it_matnr TYPE tt_matnr.
+                it_matnr TYPE gtt_matnr.
 *   True when the material is split-valuated in the valuation area,
 *   i.e. its MBEW header row carries a valuation category   [v0.3-18]
     CLASS-METHODS is_split_valuated
@@ -384,16 +302,16 @@ CLASS lcl_help DEFINITION.
                 iv_bwkey TYPE bwkey
       RETURNING VALUE(rv_split) TYPE abap_bool.
   PRIVATE SECTION.
-    CLASS-DATA: gt_mbew  TYPE tt_mbew,
+    CLASS-DATA: gt_mbew  TYPE gtt_mbew,
                 gv_bwkey TYPE bwkey.
-    CLASS-METHODS in_list
+    CLASS-METHODS is_in_list
       IMPORTING iv_val TYPE charg_d
                 iv_list TYPE string
       RETURNING VALUE(rv_hit) TYPE abap_bool.
 ENDCLASS.
 
 CLASS lcl_help IMPLEMENTATION.
-  METHOD seg_exists.
+  METHOD is_segment_created.
     DATA lv_x TYPE matnr.
 *   buffered valuation area                                  [v0.3-25]
     IF gv_bwkey IS NOT INITIAL AND iv_bwkey = gv_bwkey.
@@ -440,7 +358,7 @@ CLASS lcl_help IMPLEMENTATION.
   ENDMETHOD.
 
   METHOD is_split_valuated.
-    DATA ls_mbew TYPE ty_mbew.
+    DATA ls_mbew TYPE gty_mbew.
     IF gv_bwkey IS NOT INITIAL AND iv_bwkey = gv_bwkey.
       READ TABLE gt_mbew INTO ls_mbew
            WITH TABLE KEY matnr = iv_matnr bwtar = space.
@@ -454,7 +372,7 @@ CLASS lcl_help IMPLEMENTATION.
     rv_split = xsdbool( sy-subrc = 0 AND lv_bwtty IS NOT INITIAL ).
   ENDMETHOD.
 
-  METHOD in_list.
+  METHOD is_in_list.
     DATA: lt_tok TYPE STANDARD TABLE OF string,
           lv_tok TYPE string,
           lv_val TYPE string.
@@ -476,46 +394,55 @@ CLASS lcl_help IMPLEMENTATION.
   ENDMETHOD.
 
   METHOD is_dummy_batch.
-    rv_dummy = in_list( iv_val = iv_charg iv_list = gc_dummy_batch ).
+    rv_dummy = is_in_list( iv_val = iv_charg iv_list = gc_dummy_batch ).
   ENDMETHOD.
 
   METHOD is_no_batch.
-    rv_no = in_list( iv_val = iv_charg iv_list = gc_no_batch ).
+    rv_no = is_in_list( iv_val = iv_charg iv_list = gc_no_batch ).
   ENDMETHOD.
 ENDCLASS.
 
 *&---------------------------------------------------------------------*
 *&  Global data
 *&---------------------------------------------------------------------*
-DATA: gt_input_raw TYPE tt_input_raw,
-      gt_input_sum TYPE tt_input_sum,
-      gt_marc      TYPE tt_marc,
-      gt_badmat    TYPE tt_matnr,
-      gt_badkey    TYPE tt_badkey,
-      gt_stock     TYPE tt_stock,
-      gt_stock_loc TYPE tt_stock_loc,
-      gt_errkey    TYPE tt_errkey,
-      gt_out       TYPE tt_out,
-      gt_mov_log   TYPE STANDARD TABLE OF zlot_mov_exec,
-      gt_ext_log   TYPE STANDARD TABLE OF zlot_batch_ext,
-      gv_run_id    TYPE zlot_run_id,
+DATA: gt_input_raw TYPE gtt_input_raw,
+      gt_input_sum TYPE gtt_input_sum,
+      gt_marc      TYPE gtt_marc,
+      gt_badmat    TYPE gtt_matnr,
+      gt_badkey    TYPE gtt_badkey,
+      gt_stock     TYPE gtt_stock,
+      gt_stock_loc TYPE gtt_stock_loc,
+      gt_errkey    TYPE gtt_errkey,
+      gt_out       TYPE gtt_out,
+      gt_mov_log   TYPE STANDARD TABLE OF zptp_mov_exec,
+      gt_ext_log   TYPE STANDARD TABLE OF zptp_batch_ext,
+      gv_run_id    TYPE zdelot_run_id,
       gv_run_seq   TYPE numc3,
       gv_run_mode  TYPE c,
-      gv_posnr     TYPE numc6.
+      gv_posnr     TYPE numc06.
 
 * storage locations of the target plant (T001L), buffered once [v0.4-27]
 DATA: gt_lgort_dst TYPE SORTED TABLE OF lgort_d WITH UNIQUE KEY table_line.
 
+* reference fields for SELECT-OPTIONS (FOR needs a field, not a table)
+DATA: gv_sel_matnr TYPE matnr,
+      gv_sel_charg TYPE charg_d,
+      gv_sel_mtart TYPE mtart.
+
 *&---------------------------------------------------------------------*
 *&  Selection screen
 *&---------------------------------------------------------------------*
+* screen heading: outer frame whose title T01 is displayed in bold
+* (T01 = STOCKS & BATCHES MIGRATION PROGRAM); blocks B1-B4 sit inside it
+SELECTION-SCREEN BEGIN OF BLOCK b0 WITH FRAME TITLE TEXT-t01.
+
 SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-b01.
   PARAMETERS: p_wsrc TYPE werks_d OBLIGATORY DEFAULT '8P01',   " source plant
               p_wdst TYPE werks_d OBLIGATORY DEFAULT '8Q01',    " target plant
               p_lgdst TYPE lgort_d.        " optional, T001L check only; not posted [v0.4-26]
-  SELECT-OPTIONS: s_matnr FOR gt_stock-matnr,                   " optional filter
-                  s_charg FOR gt_stock-charg,
-                  s_mtart FOR gt_marc-mtart.                    " material type
+  SELECT-OPTIONS: s_matnr FOR gv_sel_matnr,                     " optional filter
+                  s_charg FOR gv_sel_charg,
+                  s_mtart FOR gv_sel_mtart.                     " material type
   PARAMETERS: p_budat TYPE budat DEFAULT sy-datum.              " posting date (mandatory on execution)
 SELECTION-SCREEN END OF BLOCK b1.
 
@@ -528,7 +455,7 @@ SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE TEXT-b02.
 SELECTION-SCREEN END OF BLOCK b2.
 
 SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE TEXT-b03.
-  PARAMETERS: p_runid TYPE zlot_run_id,                          " blank = new RUN_ID
+  PARAMETERS: p_runid TYPE zdelot_run_id,                          " blank = new RUN_ID
               p_reprc TYPE abap_bool AS CHECKBOX.                " reprocess error lines only
   PARAMETERS: p_full  RADIOBUTTON GROUP mod DEFAULT 'X',         " Full Validation Mode
               p_dir   RADIOBUTTON GROUP mod.                     " Direct Transfer Mode
@@ -539,30 +466,113 @@ SELECTION-SCREEN BEGIN OF BLOCK b4 WITH FRAME TITLE TEXT-b04.
   PARAMETERS: p_del TYPE abap_bool AS CHECKBOX.                  " delete RUN_ID (Z tables only)
 SELECTION-SCREEN END OF BLOCK b4.
 
+SELECTION-SCREEN END OF BLOCK b0.
+
 *&---------------------------------------------------------------------*
 *&  F4 help for the input file path (local and application server)
 *&---------------------------------------------------------------------*
 AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_file.
+  PERFORM f_f4_file.
+
+*&---------------------------------------------------------------------*
+*&  Screen consistency                                        [v0.2 - 2]
+*&---------------------------------------------------------------------*
+AT SELECTION-SCREEN.
+  PERFORM f_check_screen.
+
+*&---------------------------------------------------------------------*
+*&  Main
+*&---------------------------------------------------------------------*
+START-OF-SELECTION.
+
+* Maintenance path: delete a RUN_ID from Z tables and stop.
+  IF p_del = abap_true.
+    PERFORM f_delete_run.
+    RETURN.
+  ENDIF.
+
+* Also enforced here: a background job does not pass the screen
+* checks of AT SELECTION-SCREEN.                             [v0.3-23]
+  IF p_budat IS INITIAL.
+    MESSAGE 'Posting date is required' TYPE 'E'.
+  ENDIF.
+
+  PERFORM f_init.
+
+* 3.1 - read stock and input file
+  PERFORM f_read_input CHANGING gt_input_raw.
+  IF gt_input_raw IS INITIAL.
+    PERFORM f_save_logs.                     " keep the rejected lines
+    MESSAGE 'No usable line in the input file - see the log for rejected lines' TYPE 'E'.
+  ENDIF.
+* Batch column normalisation must happen before the aggregation, since
+* it changes the Material + Batch key of the file.              [v0.2-10]
+  PERFORM f_read_marc.
+  PERFORM f_filter_mtart.
+  PERFORM f_validate_no_batch.
+  PERFORM f_normalise_batch.
+* unit of measure and one valuation type per batch       [v0.3-16, 19]
+  PERFORM f_validate_lines.
+
+  PERFORM f_aggregate_input.
+  PERFORM f_read_sap_stock.
+
+* Restart of error lines only (sec.6)
+  IF p_reprc = abap_true.
+    PERFORM f_load_prev_errors.
+  ENDIF.
+
+* 3.2 - materials/batches in SAP but not in file (inconsistency check).
+*       Skipped on a reprocess-errors-only run: the input set is then a
+*       subset by construction and every untouched record would be
+*       re-logged as I / X.                                   [v0.2 - 3]
+  IF p_reprc = abap_false.
+    PERFORM f_check_sap_not_in_file.
+  ENDIF.
+
+* 3.2 - 3.6 - process every input line
+  PERFORM f_process_lines.
+
+* 4. - persist
+  PERFORM f_save_logs.
+
+END-OF-SELECTION.
+  PERFORM f_display_alv.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_F4_FILE                                         [v0.5-30]
+*&      F4 help for the input file path (local and application server)
+*&---------------------------------------------------------------------*
+FORM f_f4_file.
+  DATA: lt_ftab    TYPE filetable,
+        ls_ftab    TYPE file_table,
+        lv_rc      TYPE i,
+        lv_usr     TYPE i,
+        lv_srvpath TYPE dxfields-longpath,   " start folder, typed as I_PATH
+        lv_srvfile TYPE dxfields-longpath.
+
   IF p_loc = abap_true.
-    DATA: lt_ftab TYPE filetable,
-          lv_rc   TYPE i,
-          lv_usr  TYPE abap_bool.
     CALL METHOD cl_gui_frontend_services=>file_open_dialog
       EXPORTING window_title = 'Select HBM Valuation Type Input File'
       CHANGING  file_table   = lt_ftab
                 rc           = lv_rc
                 user_action  = lv_usr.
     IF lv_usr = cl_gui_frontend_services=>action_ok.
-      READ TABLE lt_ftab INDEX 1 INTO p_file.
+      READ TABLE lt_ftab INDEX 1 INTO ls_ftab.
+      IF sy-subrc = 0.
+        p_file = ls_ftab-filename.
+      ENDIF.
     ENDIF.
   ELSE.
-*   application server directory browser (FSD 4.2 / 5.1.4)
-    DATA lv_srvfile TYPE dxfields-longpath.
+*   application server directory browser. P_FILE is a string: the
+*   function module checks the type of I_PATH at runtime and dumps
+*   (CALL_FUNCTION_CONFLICT_TYPE), so pass a DXFIELDS-LONGPATH copy.
+    lv_srvpath = p_file.
     CALL FUNCTION 'F4_DXFILENAME_TOPRECURSION'
       EXPORTING
         i_location_flag = 'A'              " application server
         i_server        = ' '
-        i_path          = p_file
+        i_path          = lv_srvpath
         filemask        = '*.*'
         fileoperation   = 'R'
       IMPORTING
@@ -575,11 +585,13 @@ AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_file.
       p_file = lv_srvfile.
     ENDIF.
   ENDIF.
+ENDFORM.
 
 *&---------------------------------------------------------------------*
-*&  Screen consistency                                        [v0.2 - 2]
+*&      Form  F_CHECK_SCREEN                              [v0.2-2, v0.5-30]
+*&      Selection-screen consistency, on execution only.
 *&---------------------------------------------------------------------*
-AT SELECTION-SCREEN.
+FORM f_check_screen.
 
 * Checks run only when the report is executed (F8, background job,
 * print), not on every user command such as the switch between server
@@ -659,71 +671,13 @@ AT SELECTION-SCREEN.
     IF p_runid IS INITIAL.
       MESSAGE 'Reprocess-errors requires an existing RUN_ID' TYPE 'E'.
     ENDIF.
-    SELECT SINGLE run_id FROM zlot_mov_exec INTO @DATA(lv_r)
+    SELECT SINGLE run_id FROM zptp_mov_exec INTO @DATA(lv_r)
       WHERE run_id = @p_runid.
     IF sy-subrc <> 0.
-      MESSAGE |RUN_ID { p_runid } does not exist in ZLOT_MOV_EXEC| TYPE 'E'.
+      MESSAGE |RUN_ID { p_runid } does not exist in ZPTP_MOV_EXEC| TYPE 'E'.
     ENDIF.
   ENDIF.
-
-*&---------------------------------------------------------------------*
-*&  Main
-*&---------------------------------------------------------------------*
-START-OF-SELECTION.
-
-* Maintenance path: delete a RUN_ID from Z tables and stop.
-  IF p_del = abap_true.
-    PERFORM f_delete_run.
-    RETURN.
-  ENDIF.
-
-* Also enforced here: a background job does not pass the screen
-* checks of AT SELECTION-SCREEN.                             [v0.3-23]
-  IF p_budat IS INITIAL.
-    MESSAGE 'Posting date is required' TYPE 'E'.
-  ENDIF.
-
-  PERFORM f_init.
-
-* 3.1 - read stock and input file
-  PERFORM f_read_input CHANGING gt_input_raw.
-  IF gt_input_raw IS INITIAL.
-    PERFORM f_save_logs.                     " keep the rejected lines
-    MESSAGE 'No usable line in the input file - see the log for rejected lines' TYPE 'E'.
-  ENDIF.
-* Batch column normalisation must happen before the aggregation, since
-* it changes the Material + Batch key of the file.              [v0.2-10]
-  PERFORM f_read_marc.
-  PERFORM f_filter_mtart.
-  PERFORM f_validate_no_batch.
-  PERFORM f_normalise_batch.
-* unit of measure and one valuation type per batch       [v0.3-16, 19]
-  PERFORM f_validate_lines.
-
-  PERFORM f_aggregate_input.
-  PERFORM f_read_sap_stock.
-
-* Restart of error lines only (sec.6)
-  IF p_reprc = abap_true.
-    PERFORM f_load_prev_errors.
-  ENDIF.
-
-* 3.2 - materials/batches in SAP but not in file (inconsistency check).
-*       Skipped on a reprocess-errors-only run: the input set is then a
-*       subset by construction and every untouched record would be
-*       re-logged as I / X.                                   [v0.2 - 3]
-  IF p_reprc = abap_false.
-    PERFORM f_check_sap_not_in_file.
-  ENDIF.
-
-* 3.2 - 3.6 - process every input line
-  PERFORM f_process_lines.
-
-* 4. - persist
-  PERFORM f_save_logs.
-
-END-OF-SELECTION.
-  PERFORM f_display_alv.
+ENDFORM.
 
 *&---------------------------------------------------------------------*
 *&      Form  F_INIT   (resolve RUN_ID + sequence + mode)
@@ -748,7 +702,7 @@ FORM f_init.
 
 * Sequence: next incremental attempt for this RUN_ID.
   SELECT MAX( run_seq ) INTO @DATA(lv_maxseq)
-    FROM zlot_mov_exec
+    FROM zptp_mov_exec
     WHERE run_id = @gv_run_id.
   IF sy-subrc = 0 AND lv_maxseq IS NOT INITIAL.
     gv_run_seq = lv_maxseq + 1.
@@ -756,7 +710,7 @@ FORM f_init.
     gv_run_seq = 1.
   ENDIF.
 
-  WRITE: / 'HBM Split Valuation - Phase 1'.
+  WRITE: / 'HBM Split Valuation'.
   WRITE: / 'RUN_ID:', gv_run_id, 'Seq:', gv_run_seq,
            'Mode:', COND string( WHEN gv_run_mode = gc_mode_dir
                                  THEN 'DIRECT' ELSE 'FULL' ).
@@ -779,14 +733,14 @@ FORM f_delete_run.
 * authorization, and a run that posted documents is kept.  [v0.3-22]
   AUTHORITY-CHECK OBJECT 'S_TABU_NAM'
     ID 'ACTVT' FIELD '02'
-    ID 'TABLE' FIELD 'ZLOT_MOV_EXEC'.
+    ID 'TABLE' FIELD 'ZPTP_MOV_EXEC'.
   IF sy-subrc <> 0.
-    MESSAGE 'No authorization to delete the log (S_TABU_NAM, ZLOT_MOV_EXEC)'
+    MESSAGE 'No authorization to delete the log (S_TABU_NAM, ZPTP_MOV_EXEC)'
             TYPE 'S' DISPLAY LIKE 'E'.
     RETURN.
   ENDIF.
 
-  SELECT SINGLE posnr FROM zlot_mov_exec INTO @DATA(lv_posted)
+  SELECT SINGLE posnr FROM zptp_mov_exec INTO @DATA(lv_posted)
     WHERE run_id  = @p_runid
       AND status  = @gc_st_ok
       AND testrun = @space.
@@ -811,9 +765,9 @@ FORM f_delete_run.
     RETURN.
   ENDIF.
 
-  DELETE FROM zlot_mov_exec  WHERE run_id = p_runid.
+  DELETE FROM zptp_mov_exec  WHERE run_id = p_runid.
   DATA(lv_mov) = sy-dbcnt.
-  DELETE FROM zlot_batch_ext WHERE run_id = p_runid.
+  DELETE FROM zptp_batch_ext WHERE run_id = p_runid.
   DATA(lv_ext) = sy-dbcnt.
   COMMIT WORK.
 
@@ -824,7 +778,7 @@ ENDFORM.
 *&---------------------------------------------------------------------*
 *&      Form  F_READ_INPUT   (dispatch server / local)
 *&---------------------------------------------------------------------*
-FORM f_read_input CHANGING ct_raw TYPE tt_input_raw.
+FORM f_read_input CHANGING ct_raw TYPE gtt_input_raw.
   DATA lt_lines TYPE STANDARD TABLE OF string.
   IF p_loc = abap_true.
     PERFORM f_read_lines_local  CHANGING lt_lines.
@@ -882,11 +836,11 @@ ENDFORM.
 *&      logged, instead of being dropped silently.
 *&---------------------------------------------------------------------*
 FORM f_parse_lines USING it_lines TYPE stringtab
-                   CHANGING ct_raw TYPE tt_input_raw.
+                   CHANGING ct_raw TYPE gtt_input_raw.
   DATA: lv_line  TYPE string,
         lt_field TYPE STANDARD TABLE OF string,
-        ls_raw   TYPE ty_input_raw,
-        ls_out   TYPE ty_out,
+        ls_raw   TYPE gty_input_raw,
+        ls_out   TYPE gty_out,
         lv_qty_c TYPE string,
         lv_idx   TYPE i,
         lv_num   TYPE abap_bool,
@@ -1039,7 +993,7 @@ FORM f_parse_lines USING it_lines TYPE stringtab
       CONTINUE.
     ENDIF.
 
-*   selection-screen restriction (documented in FSD 4.2)
+*   selection-screen restriction
     CHECK ls_raw-matnr IN s_matnr AND ls_raw-charg IN s_charg.
     APPEND ls_raw TO ct_raw.
   ENDLOOP.
@@ -1077,7 +1031,7 @@ FORM f_read_marc.
 
 * Valuation segments of the target plant, read once instead of one
 * SELECT per line and per stock record                     [v0.3-25]
-  DATA lt_mat_dst TYPE tt_matnr.
+  DATA lt_mat_dst TYPE gtt_matnr.
   LOOP AT gt_marc INTO DATA(ls_mdst) WHERE werks = p_wdst.
     INSERT ls_mdst-matnr INTO TABLE lt_mat_dst.
   ENDLOOP.
@@ -1088,14 +1042,14 @@ ENDFORM.
 *&      Form  F_FILTER_MTART                                 [v0.2 - 13]
 *&      Restricts the input file to the material types selected. Lines
 *&      whose material is unknown in the source plant are kept, so that
-*&      they are still reported by ZHBM 006 or ZHBM 014 instead of
+*&      they are still reported by ZPTP_SPLIT_VAL 006 or ZPTP_SPLIT_VAL 014 instead of
 *&      disappearing silently.
 *&---------------------------------------------------------------------*
 FORM f_filter_mtart.
 
-  DATA: ls_raw  TYPE ty_input_raw,
-        ls_mrc  TYPE ty_marc,
-        lt_keep TYPE tt_input_raw.
+  DATA: ls_raw  TYPE gty_input_raw,
+        ls_mrc  TYPE gty_marc,
+        lt_keep TYPE gtt_input_raw.
 
   IF s_mtart[] IS INITIAL.
     RETURN.
@@ -1125,8 +1079,8 @@ ENDFORM.
 *&---------------------------------------------------------------------*
 FORM f_validate_no_batch.
 
-  DATA: ls_raw TYPE ty_input_raw,
-        ls_mrc TYPE ty_marc,
+  DATA: ls_raw TYPE gty_input_raw,
+        ls_mrc TYPE gty_marc,
         lv_mat TYPE matnr.
 
 * Nothing declared: no need to read the batch stock.
@@ -1140,7 +1094,7 @@ FORM f_validate_no_batch.
 * batch-managed while batches created earlier still hold stock; such a
 * material cannot be transferred as a non-batch record, because the
 * movement would have to address those batches.            [v0.2 - 12]
-  DATA lt_with_batch TYPE tt_matnr.                          " [v0.3-25]
+  DATA lt_with_batch TYPE gtt_matnr.                          " [v0.3-25]
   SELECT DISTINCT matnr INTO TABLE @lt_with_batch
     FROM mchb
     WHERE werks =  @p_wsrc
@@ -1206,12 +1160,12 @@ ENDFORM.
 
 *&---------------------------------------------------------------------*
 *&      Form  F_NORMALISE_BATCH                              [v0.2 - 10]
-*&      The specification requires a blank batch for a non-batch-managed
+*&      The requirement is a blank batch for a non-batch-managed
 *&      material. Files produced outside SAP often carry a placeholder
 *&      instead (NO_BATCH and the like), and such a value would make the
 *&      file key differ from the stock key: the line would be blocked
-*&      with ZHBM 006 and the stock reported as inconsistent with
-*&      ZHBM 010, for every non-batch-managed material.
+*&      with ZPTP_SPLIT_VAL 006 and the stock reported as inconsistent with
+*&      ZPTP_SPLIT_VAL 010, for every non-batch-managed material.
 *&      Two safeguards: the placeholder list handled in F_PARSE_LINES,
 *&      and here any batch value carried by a material that is not
 *&      batch-managed according to MARC-XCHPF. One warning row per run
@@ -1220,9 +1174,9 @@ ENDFORM.
 *&---------------------------------------------------------------------*
 FORM f_normalise_batch.
 
-  DATA: ls_raw TYPE ty_input_raw,
-        ls_mrc TYPE ty_marc,
-        ls_out TYPE ty_out,
+  DATA: ls_raw TYPE gty_input_raw,
+        ls_mrc TYPE gty_marc,
+        ls_out TYPE gty_out,
         lv_cnt TYPE i.
 
   LOOP AT gt_input_raw INTO ls_raw.
@@ -1270,12 +1224,12 @@ ENDFORM.
 *&---------------------------------------------------------------------*
 FORM f_validate_lines.
 
-  DATA: ls_raw   TYPE ty_input_raw,
-        ls_mrc   TYPE ty_marc,
-        lt_vt    TYPE tt_errkey,          " MATNR + CHARG + BWTAR, unique
-        ls_vt    TYPE ty_errkey,
-        lt_multi TYPE tt_badkey,
-        ls_key   TYPE ty_badkey.
+  DATA: ls_raw   TYPE gty_input_raw,
+        ls_mrc   TYPE gty_marc,
+        lt_vt    TYPE gtt_errkey,          " MATNR + CHARG + BWTAR, unique
+        ls_vt    TYPE gty_errkey,
+        lt_multi TYPE gtt_badkey,
+        ls_key   TYPE gty_badkey.
 
 * --- unit of measure = base unit -----------------------------------
   LOOP AT gt_input_raw INTO ls_raw WHERE bad = abap_false.
@@ -1291,7 +1245,7 @@ FORM f_validate_lines.
       ls_raw-badtx = |Unit { ls_raw-meins } differs from base unit { ls_mrc-meins } | &&
                      |of material { ls_raw-matnr } - give the quantity in the base unit|.
       MODIFY gt_input_raw FROM ls_raw.
-      INSERT VALUE ty_badkey( matnr = ls_raw-matnr charg = ls_raw-charg )
+      INSERT VALUE gty_badkey( matnr = ls_raw-matnr charg = ls_raw-charg )
              INTO TABLE gt_badkey.
     ENDIF.
   ENDLOOP.
@@ -1300,7 +1254,7 @@ FORM f_validate_lines.
 * Zero-quantity lines move nothing and do not count as a valuation type.
   LOOP AT gt_input_raw INTO ls_raw WHERE bad = abap_false AND charg IS NOT INITIAL
                                      AND menge <> 0.
-    INSERT VALUE ty_errkey( matnr = ls_raw-matnr
+    INSERT VALUE gty_errkey( matnr = ls_raw-matnr
                             charg = ls_raw-charg
                             bwtar = ls_raw-bwtar ) INTO TABLE lt_vt.
   ENDLOOP.
@@ -1331,7 +1285,7 @@ FORM f_validate_lines.
                    |several valuation types in the input file; a batch carries one | &&
                    |valuation type - batch rejected|.
     MODIFY gt_input_raw FROM ls_raw.
-    INSERT VALUE ty_badkey( matnr = ls_raw-matnr charg = ls_raw-charg )
+    INSERT VALUE gty_badkey( matnr = ls_raw-matnr charg = ls_raw-charg )
            INTO TABLE gt_badkey.
   ENDLOOP.
 ENDFORM.
@@ -1340,8 +1294,8 @@ ENDFORM.
 *&      Form  F_AGGREGATE_INPUT   (sum per MATNR + CHARG)
 *&---------------------------------------------------------------------*
 FORM f_aggregate_input.
-  DATA: ls_raw TYPE ty_input_raw,
-        ls_sum TYPE ty_input_sum.
+  DATA: ls_raw TYPE gty_input_raw,
+        ls_sum TYPE gty_input_sum.
   LOOP AT gt_input_raw INTO ls_raw.
     CHECK ls_raw-bad = abap_false.        " blocked line, not reconciled
     READ TABLE gt_input_sum INTO ls_sum
@@ -1370,8 +1324,8 @@ ENDFORM.
 *&---------------------------------------------------------------------*
 FORM f_read_sap_stock.
 
-  DATA: ls_stk TYPE ty_stock,
-        ls_loc TYPE ty_stock_loc.
+  DATA: ls_stk TYPE gty_stock,
+        ls_loc TYPE gty_stock_loc.
 
 * --- batch-managed materials: MCHB unrestricted (CLABS) per LGORT ---
   SELECT matnr, werks, lgort, charg, clabs
@@ -1471,13 +1425,13 @@ ENDFORM.
 FORM f_allocate_lgort USING iv_matnr TYPE matnr
                             iv_charg TYPE charg_d
                             iv_menge TYPE menge_d
-                      CHANGING ct_alloc TYPE tt_alloc
+                      CHANGING ct_alloc TYPE gtt_alloc
                                cv_ok    TYPE abap_bool
                                cv_avail TYPE menge_d.
 
-  DATA: lt_cand TYPE STANDARD TABLE OF ty_stock_loc,
-        ls_loc  TYPE ty_stock_loc,
-        ls_all  TYPE ty_alloc,
+  DATA: lt_cand TYPE STANDARD TABLE OF gty_stock_loc,
+        ls_loc  TYPE gty_stock_loc,
+        ls_all  TYPE gty_alloc,
         lv_rest TYPE menge_d,
         lv_take TYPE menge_d.
 
@@ -1523,12 +1477,12 @@ ENDFORM.
 *&      iv_sign = -1 consume the allocated quantities, +1 give them back
 *&      (posting failed, the stock is still available for another line).
 *&---------------------------------------------------------------------*
-FORM f_consume_alloc USING it_alloc TYPE tt_alloc
+FORM f_consume_alloc USING it_alloc TYPE gtt_alloc
                            iv_matnr TYPE matnr
                            iv_charg TYPE charg_d
                            iv_sign  TYPE i.
-  DATA: ls_all TYPE ty_alloc,
-        ls_loc TYPE ty_stock_loc.
+  DATA: ls_all TYPE gty_alloc,
+        ls_loc TYPE gty_stock_loc.
   LOOP AT it_alloc INTO ls_all.
     READ TABLE gt_stock_loc INTO ls_loc
          WITH KEY matnr = iv_matnr charg = iv_charg lgort = ls_all-lgort.
@@ -1555,7 +1509,7 @@ FORM f_load_prev_errors.
 * of the previous sequence (one per issuing storage location), and
 * GT_ERRKEY has a unique key.                                 [v0.2 - 4]
   SELECT DISTINCT matnr, charg, bwtar INTO TABLE @gt_errkey
-    FROM zlot_mov_exec
+    FROM zptp_mov_exec
     WHERE run_id  = @gv_run_id
       AND run_seq = @lv_prevseq
       AND status  = @gc_st_err.
@@ -1564,7 +1518,7 @@ FORM f_load_prev_errors.
 * definition absent from the input file and carry no valuation type.
 * Warn the user, who must complete the file and start a full run.
   SELECT COUNT( * ) INTO @DATA(lv_inc)
-    FROM zlot_mov_exec
+    FROM zptp_mov_exec
     WHERE run_id  = @gv_run_id
       AND run_seq = @lv_prevseq
       AND status  = @gc_st_incons.
@@ -1581,7 +1535,7 @@ FORM f_load_prev_errors.
   ENDIF.
 
 * keep only raw lines that match a previous error key
-  DATA lt_keep TYPE tt_input_raw.
+  DATA lt_keep TYPE gtt_input_raw.
   LOOP AT gt_input_raw INTO DATA(ls_raw).
     READ TABLE gt_errkey TRANSPORTING NO FIELDS
          WITH KEY matnr = ls_raw-matnr
@@ -1604,8 +1558,8 @@ ENDFORM.
 *&---------------------------------------------------------------------*
 FORM f_check_sap_not_in_file.
 
-  DATA: ls_stk TYPE ty_stock,
-        ls_out TYPE ty_out.
+  DATA: ls_stk TYPE gty_stock,
+        ls_out TYPE gty_out.
 
   IF gv_run_mode = gc_mode_dir.
     RETURN.                          " Direct mode bypasses validations
@@ -1640,8 +1594,8 @@ FORM f_check_sap_not_in_file.
     ls_out-qty_sap = ls_stk-menge.
     ls_out-meins   = ls_stk-meins.
 
-    IF lcl_help=>seg_exists( iv_matnr = ls_stk-matnr
-                             iv_bwkey = p_wdst ) = abap_true.
+    IF lcl_help=>is_segment_created( iv_matnr = ls_stk-matnr
+                                     iv_bwkey = p_wdst ) = abap_true.
 *     inconsistency: stock exists in SAP, valuation segment already in
 *     target plant, but the record is missing from the input file.
       ls_out-status  = gc_st_incons.
@@ -1663,12 +1617,12 @@ ENDFORM.
 *&---------------------------------------------------------------------*
 FORM f_process_lines.
 
-  DATA: ls_raw   TYPE ty_input_raw,
-        ls_stk   TYPE ty_stock,
-        ls_sum   TYPE ty_input_sum,
-        ls_out   TYPE ty_out,
-        lt_alloc TYPE tt_alloc,
-        ls_alloc TYPE ty_alloc,
+  DATA: ls_raw   TYPE gty_input_raw,
+        ls_stk   TYPE gty_stock,
+        ls_sum   TYPE gty_input_sum,
+        ls_out   TYPE gty_out,
+        lt_alloc TYPE gtt_alloc,
+        ls_alloc TYPE gty_alloc,
         lv_avail TYPE menge_d,
         lv_aok   TYPE abap_bool,
         lv_full  TYPE abap_bool,
@@ -1686,8 +1640,8 @@ FORM f_process_lines.
         lv_lgmis TYPE lgort_d.                          " [v0.4-27]
 
 * memorised batch-extension result per MATNR + CHARG          [v0.2 - 6]
-  DATA: lt_done TYPE tt_done,
-        ls_done TYPE ty_done.
+  DATA: lt_done TYPE gtt_done,
+        ls_done TYPE gty_done.
 
   lv_full = COND #( WHEN gv_run_mode = gc_mode_full THEN abap_true
                                                      ELSE abap_false ).
@@ -1743,9 +1697,9 @@ FORM f_process_lines.
     IF lv_full = abap_true.
 
 *     3.3 valuation-type segment must exist in target plant
-      IF lcl_help=>seg_exists( iv_matnr = ls_raw-matnr
-                               iv_bwkey = p_wdst
-                               iv_bwtar = ls_raw-bwtar ) = abap_false.
+      IF lcl_help=>is_segment_created( iv_matnr = ls_raw-matnr
+                                       iv_bwkey = p_wdst
+                                       iv_bwtar = ls_raw-bwtar ) = abap_false.
         ls_out-status  = gc_st_err.
         ls_out-message = |Valuation type { ls_raw-bwtar } not created in target plant { p_wdst }|.
         PERFORM f_add_log USING gc_msgid '003' 'E' CHANGING ls_out.
@@ -1755,11 +1709,10 @@ FORM f_process_lines.
 *     3.5 quantity validation: file total = SAP unrestricted stock
       READ TABLE gt_input_sum INTO ls_sum
            WITH KEY matnr = ls_raw-matnr charg = ls_raw-charg.
-      DATA(lv_var) = ls_sum-menge - ls_out-qty_sap.
-      ls_out-variance = lv_var.
-      IF lv_var <> 0.
+      ls_out-variance = ls_sum-menge - ls_out-qty_sap.   " MENGE_D keeps the 3 decimals
+      IF ls_out-variance <> 0.
         ls_out-status  = gc_st_err.
-        ls_out-message = |Quantity mismatch: file { ls_sum-menge } vs SAP { ls_out-qty_sap } (var { lv_var })|.
+        ls_out-message = |Quantity mismatch: file { ls_sum-menge } vs SAP { ls_out-qty_sap } (var { ls_out-variance })|.
         PERFORM f_add_log USING gc_msgid '004' 'E' CHANGING ls_out.
         CONTINUE.
       ENDIF.
@@ -1879,7 +1832,7 @@ FORM f_process_lines.
     IF lv_cerr = abap_true AND p_test = abap_false AND lv_mblnr IS NOT INITIAL.
       DATA(lv_utxt) = CONV natxt( |Update failed after commit - document | &&
                                   |{ lv_mblnr } not posted. { lv_cmsg }| ).
-      UPDATE zlot_mov_exec
+      UPDATE zptp_mov_exec
          SET status = @gc_st_err, msgty = 'E', msgid = @gc_msgid,
              msgno  = '022', msgtx = @lv_utxt
        WHERE run_id  = @gv_run_id
@@ -1922,7 +1875,9 @@ FORM f_extend_batch USING iv_matnr TYPE matnr
   DATA: ls_att  TYPE bapibatchatt,
         lt_ret  TYPE STANDARD TABLE OF bapiret2,
         ls_ret  TYPE bapiret2,
-        lv_newb TYPE charg_d.
+        lv_newb TYPE charg_d,
+        lv_noid TYPE symsgid,          " empty message id/no for the log
+        lv_nono TYPE symsgno.
 
   CLEAR: cv_ok, cv_msg, cv_id, cv_no, cv_ty.
 
@@ -1944,7 +1899,7 @@ FORM f_extend_batch USING iv_matnr TYPE matnr
     cv_ok  = abap_true.
     cv_msg = 'Batch already exists in target plant'.
     PERFORM f_add_ext_log USING iv_matnr iv_charg gc_st_ok abap_true
-                                'S' space space cv_msg.
+                                'S' lv_noid lv_nono cv_msg.
     RETURN.
   ENDIF.
 
@@ -1972,7 +1927,7 @@ FORM f_extend_batch USING iv_matnr TYPE matnr
     cv_ok  = abap_true.                        " assume creatable in sim
     cv_msg = 'Simulation: batch would be extended to target plant'.
     PERFORM f_add_ext_log USING iv_matnr iv_charg gc_st_test space
-                                space space space cv_msg.
+                                space lv_noid lv_nono cv_msg.
     RETURN.
   ENDIF.
 
@@ -2000,7 +1955,7 @@ FORM f_extend_batch USING iv_matnr TYPE matnr
     cv_ok  = abap_true.
     cv_msg = 'Batch extended to target plant (source batch attributes copied)'.
     PERFORM f_add_ext_log USING iv_matnr iv_charg gc_st_ok space
-                                'S' space space cv_msg.
+                                'S' lv_noid lv_nono cv_msg.
   ENDIF.
 ENDFORM.
 
@@ -2018,8 +1973,8 @@ ENDFORM.
 *&      Simulation: the BAPI runs with TESTRUN = 'X', then rollback.
 *&                                                           [v0.3-21]
 *&---------------------------------------------------------------------*
-FORM f_post_301 USING is_raw   TYPE ty_input_raw
-                      it_alloc TYPE tt_alloc
+FORM f_post_301 USING is_raw   TYPE gty_input_raw
+                      it_alloc TYPE gtt_alloc
                       iv_bwtar TYPE bwtar_d
                 CHANGING cv_mblnr TYPE mblnr
                          cv_mjahr TYPE mjahr
@@ -2032,7 +1987,7 @@ FORM f_post_301 USING is_raw   TYPE ty_input_raw
         ls_code  TYPE bapi2017_gm_code,
         lt_item  TYPE STANDARD TABLE OF bapi2017_gm_item_create,
         ls_item  TYPE bapi2017_gm_item_create,
-        ls_alloc TYPE ty_alloc,
+        ls_alloc TYPE gty_alloc,
         lt_ret   TYPE STANDARD TABLE OF bapiret2,
         ls_ret   TYPE bapiret2,
         lv_doc   TYPE bapi2017_gm_head_ret-mat_doc,
@@ -2042,7 +1997,7 @@ FORM f_post_301 USING is_raw   TYPE ty_input_raw
 
   ls_head-pstng_date = p_budat.
   ls_head-doc_date   = sy-datum.
-  ls_head-header_txt = 'HBM Split Val Ph1'.
+  ls_head-header_txt = 'HBM Split Val'.
   ls_code-gm_code    = gc_gm_code.
 
   LOOP AT it_alloc INTO ls_alloc.
@@ -2103,16 +2058,16 @@ FORM f_post_301 USING is_raw   TYPE ty_input_raw
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*&      Form  F_ADD_LOG   (buffer one ZLOT_MOV_EXEC row + ALV row)
+*&      Form  F_ADD_LOG   (buffer one ZPTP_MOV_EXEC row + ALV row)
 *&      Stamps the run context on the output row, so the ALV mirrors
-*&      ZLOT_MOV_EXEC as specified in FSD 4.4.2.              [v0.2 - 9]
+*&      ZPTP_MOV_EXEC.                                        [v0.2 - 9]
 *&---------------------------------------------------------------------*
 FORM f_add_log USING iv_id  TYPE symsgid
                      iv_no  TYPE symsgno
                      iv_ty  TYPE symsgty
-               CHANGING cs_out TYPE ty_out.
+               CHANGING cs_out TYPE gty_out.
 
-  DATA ls_log TYPE zlot_mov_exec.
+  DATA ls_log TYPE zptp_mov_exec.
 
   ADD 1 TO gv_posnr.
 
@@ -2171,7 +2126,7 @@ FORM f_add_log USING iv_id  TYPE symsgid
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*&      Form  F_ADD_EXT_LOG   (buffer one ZLOT_BATCH_EXT row)
+*&      Form  F_ADD_EXT_LOG   (buffer one ZPTP_BATCH_EXT row)
 *&---------------------------------------------------------------------*
 FORM f_add_ext_log USING iv_matnr TYPE matnr
                          iv_charg TYPE charg_d
@@ -2181,7 +2136,7 @@ FORM f_add_ext_log USING iv_matnr TYPE matnr
                          iv_id    TYPE symsgid
                          iv_no    TYPE symsgno
                          iv_txt   TYPE bapi_msg.
-  DATA ls_log TYPE zlot_batch_ext.
+  DATA ls_log TYPE zptp_batch_ext.
   ls_log-run_id        = gv_run_id.
   ls_log-run_seq       = gv_run_seq.
   ls_log-matnr         = iv_matnr.
@@ -2231,9 +2186,9 @@ FORM f_flush_logs CHANGING cv_err TYPE abap_bool
 
   IF gt_ext_log IS NOT INITIAL.
     lv_n = lines( gt_ext_log ).
-    INSERT zlot_batch_ext FROM TABLE gt_ext_log ACCEPTING DUPLICATE KEYS.
+    INSERT zptp_batch_ext FROM TABLE gt_ext_log ACCEPTING DUPLICATE KEYS.
     IF sy-dbcnt <> lv_n.
-      lv_txt = |ZLOT_BATCH_EXT: { lv_n - sy-dbcnt } log row(s) not written (duplicate key)|.
+      lv_txt = |ZPTP_BATCH_EXT: { lv_n - sy-dbcnt } log row(s) not written (duplicate key)|.
       WRITE: / lv_txt COLOR COL_NEGATIVE.
     ENDIF.
     CLEAR gt_ext_log.
@@ -2241,9 +2196,9 @@ FORM f_flush_logs CHANGING cv_err TYPE abap_bool
 
   IF gt_mov_log IS NOT INITIAL.
     lv_n = lines( gt_mov_log ).
-    INSERT zlot_mov_exec FROM TABLE gt_mov_log ACCEPTING DUPLICATE KEYS.
+    INSERT zptp_mov_exec FROM TABLE gt_mov_log ACCEPTING DUPLICATE KEYS.
     IF sy-dbcnt <> lv_n.
-      lv_txt = |ZLOT_MOV_EXEC: { lv_n - sy-dbcnt } log row(s) not written (duplicate key)|.
+      lv_txt = |ZPTP_MOV_EXEC: { lv_n - sy-dbcnt } log row(s) not written (duplicate key)|.
       WRITE: / lv_txt COLOR COL_NEGATIVE.
     ENDIF.
     CLEAR gt_mov_log.

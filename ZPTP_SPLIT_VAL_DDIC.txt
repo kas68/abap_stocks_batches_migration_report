@@ -1,12 +1,15 @@
 ********************************************************************************
-* HBM - Phase 1 : Batch Stock Transfer to New Plant (Split Valuation)
-* Spec: FSD_TSD_HBM_SplitValuation_Phase1_ZHBM_SPLIT_VAL_PH1 v0.4
-* Program version: v0.4 (message 023 added, no table change)
-* DDIC objects to create in SE11 BEFORE activating ZHBM_SPLIT_VAL_PH1
+* HBM : Batch Stock Transfer to New Plant (Split Valuation)
+* Program version: v0.5 (objects renamed to the Sysmex D-Project ABAP
+*                  Development Standards & Naming Conventions v1.2)
+* DDIC objects to create in SE11 BEFORE activating ZPTP_SPLIT_VAL_MIG
+* Work Stream ID: PTP (MM, Appendix B of the standard)
+* Package (suggested): ZPTP_SPLIT_VAL  (Z<WS_ID>_<name>)
 ********************************************************************************
 * Log tables:
-*   - ZLOT_MOV_EXEC  : one line per processed record / 301 attempt
-*   - ZLOT_BATCH_EXT : one line per batch extension (BAPI_BATCH_CREATE)
+*   - ZPTP_MOV_EXEC  : one line per processed record / 301 attempt
+*   - ZPTP_BATCH_EXT : one line per batch handled in the target plant (created,
+*                    already existing, simulated or failed)
 * Both client-dependent, delivery class A, Display/Maintenance allowed.
 ********************************************************************************
 
@@ -16,14 +19,15 @@ DOMAINS / DATA ELEMENTS
 Reuse standard: MATNR, CHARG_D, WERKS_D, LGORT_D, BWTAR_D, BWKEY, XCHPF,
 MENGE_D, MEINS, BWART, BUDAT, MBLNR, MJAHR, SYMSGID, SYMSGNO, SYMSGTY,
 ERNAM, ERDAT, ERZET.
+NUMC06 (NUMC 6, used by POSNR): create it if it does not exist in the system.
 
-Custom:
-Data element ZLOT_RUN_ID   Domain CHAR32     Migration run id (base)
-Data element ZLOT_RUN_SEQ  Domain NUMC3      Restart sequence (001,002,...)
-Data element ZLOT_RUN_MODE Domain ZLOT_RUN_MODE (CHAR1)
+Custom (naming: data element ZDE<name>, domain Z<name>):
+Data element ZDELOT_RUN_ID   Domain CHAR32     Migration run id (base)
+Data element ZDELOT_RUN_SEQ  Domain NUMC3      Restart sequence (001,002,...)
+Data element ZDELOT_RUN_MODE Domain ZLOT_RUN_MODE (CHAR1)
    Fixed values: F = Full Validation Mode
                  D = Direct Transfer Mode
-Data element ZLOT_STATUS   Domain ZLOT_STATUS (CHAR1)
+Data element ZDELOT_STATUS   Domain ZLOT_STATUS (CHAR1)
    Fixed values: S = Success / posted
                  E = Error / blocked / excluded
                  W = Warning
@@ -33,16 +37,16 @@ Data element ZLOT_STATUS   Domain ZLOT_STATUS (CHAR1)
                  I = Inconsistent (SAP stock not in input file, segment exists)
 
 ================================================================================
-TABLE  ZLOT_MOV_EXEC   "Phase1 - movement execution log
+TABLE  ZPTP_MOV_EXEC   "Movement execution log
 ================================================================================
 Delivery class A            Data maintenance: Display/Maintenance Allowed
 Field         Key  Element / Type       Description
 --------------------------------------------------------------------------------
 MANDT          X   MANDT                 Client
-RUN_ID         X   ZLOT_RUN_ID           Migration run id (base)
-RUN_SEQ        X   ZLOT_RUN_SEQ          Restart sequence (001,002,...)
-POSNR          X   NUMC6                 Sequential line no. within attempt
-RUN_MODE           ZLOT_RUN_MODE         Execution mode (F/D)
+RUN_ID         X   ZDELOT_RUN_ID         Migration run id (base)
+RUN_SEQ        X   ZDELOT_RUN_SEQ        Restart sequence (001,002,...)
+POSNR          X   NUMC06                Sequential line no. within attempt
+RUN_MODE           ZDELOT_RUN_MODE       Execution mode (F/D)
 TESTRUN            XFELD (CHAR1)         'X' = simulation, no posting
 MATNR              MATNR                 Material
 CHARG              CHARG_D               Batch (blank for non-batch material)
@@ -62,7 +66,7 @@ MEINS              MEINS                 Base unit of measure
 STOCK_SAP          MENGE_D               SAP unrestricted stock at validation
 QTY_INPUT          MENGE_D               Input-file quantity (line/aggregated)
 VARIANCE           MENGE_D               Input file - SAP variance
-STATUS             ZLOT_STATUS           Record result
+STATUS             ZDELOT_STATUS         Record result
 MBLNR              MBLNR                 Material document (if posted)
 MJAHR              MJAHR                 Fiscal / document year
 MSGTY              SYMSGTY               Message type
@@ -81,18 +85,18 @@ quantity of the whole input-file line, so QTY_INPUT repeats across the
 rows of the same line. All rows of one input line share MBLNR / MJAHR.
 
 ================================================================================
-TABLE  ZLOT_BATCH_EXT   "Phase1 - batch extension log
+TABLE  ZPTP_BATCH_EXT   "Batch extension log
 ================================================================================
 Delivery class A            Data maintenance: Display/Maintenance Allowed
 Field         Key  Element / Type       Description
 --------------------------------------------------------------------------------
 MANDT          X   MANDT                 Client
-RUN_ID         X   ZLOT_RUN_ID           Migration run id
-RUN_SEQ        X   ZLOT_RUN_SEQ          Restart sequence
+RUN_ID         X   ZDELOT_RUN_ID         Migration run id
+RUN_SEQ        X   ZDELOT_RUN_SEQ        Restart sequence
 MATNR          X   MATNR                 Material
 CHARG          X   CHARG_D               Batch
 WERKS_DST      X   WERKS_D               Target plant
-STATUS             ZLOT_STATUS           Extension result (S/E/T)
+STATUS             ZDELOT_STATUS         Extension result (S/E/T)
 ALREADY_EXIST      XFELD (CHAR1)         'X' = batch already existed
 MSGTY              SYMSGTY               Message type
 MSGID              SYMSGID               Message class
@@ -103,7 +107,7 @@ ERDAT              ERDAT                 Created on
 ERZET              ERZET                 Created at
 
 ================================================================================
-MESSAGE CLASS  ZHBM  (SE91) - used by the program
+MESSAGE CLASS  ZPTP_SPLIT_VAL  (SE91) - used by the program
 ================================================================================
 002  Zero quantity in input file - no movement created
 003  Valuation type &1 not created in target plant &2
@@ -131,6 +135,23 @@ MESSAGE CLASS  ZHBM  (SE91) - used by the program
 022  Update failed after commit - document &1 not posted            [v0.3]
 023  Storage location &1 does not exist in plant &2 - line not
      transferred                                                    [v0.4]
-(The program currently passes free text in MSGTX; message-class entries are
- recommended so MSGID/MSGNO are meaningful for reporting.)
+(The program passes MSGID/MSGNO together with a free text in MSGTX; the entries
+ above are required so MSGID/MSGNO resolve to a text when the log is reported on.
+ 009 is also used when the material number cannot be converted (MATN1).
+ Errors returned by BAPI_BATCH_CREATE / BAPI_GOODSMVT_CREATE keep the BAPI's own
+ message class and number.)
+Standard 4.10: a dedicated message class per large development (hence
+ZPTP_SPLIT_VAL, not a shared ZPTP), numbered placeholders &1..&4, no 000/999,
+long text (problem / what to do / admin) to be maintained for each entry.
+
+================================================================================
+DDIC STANDARDS TO APPLY WHEN CREATING THE OBJECTS (standard sec. 4.19)
+================================================================================
+- Both tables as column store.
+- Lock object EZPTP_MOV_EXEC (E<database table>) if the log is updated by
+  more than one program; the report itself runs one RUN_ID at a time.
+- If an SM30 maintenance view is generated: "Log Data Changes" on and an
+  authorization group other than &NC&. As the log is the audit trail,
+  display-only maintenance is preferred.
+- Transaction code, if one is needed: ZPTP_SPLIT_VAL_MIG (Z<WS_ID>_<name>).
 ********************************************************************************
