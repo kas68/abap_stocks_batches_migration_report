@@ -1,4 +1,4 @@
-# ZPTP_SPLIT_VAL_MIG — HBM Split Valuation (program v0.5)
+# ZPTP_SPLIT_VAL_MIG — HBM Split Valuation (program v0.6)
 
 Inter-plant transfer (mvt 301) of **unrestricted** stock from source plant **8P01** to the
 new Split-Valuation plant **8Q01**. Both plants are defaults on the selection screen and stay
@@ -18,6 +18,16 @@ This repository holds the code only; version history is kept in git (the former
 - `HIGH_LEVEL_OVERVIEW.md` — non-technical overview of the program.
 - `SAP ABAP Development Standard and Namimg Conventions.docx` — the customer's development
   standards and naming conventions (Sysmex D-Project, v1.2).
+
+## What changed in v0.6 (storage-location mapping)
+| # | Change | Why |
+|---|---|---|
+| 41 | The receiving storage location of each 301 item is read from the new table `ZPTP_SLOC_MAP` (source plant + storage location → target plant + storage location) instead of reusing the issuing code. `MOVE_STLOC` and `LGORT_DST` carry the mapped location | The storage locations of 8Q01 do not necessarily have the codes of 8P01 |
+| 42 | An issuing storage location without a mapping entry blocks the line with `ZPTP_SPLIT_VAL 024`; a mapped location missing in the target plant (`T001L`) blocks it with `023`. Both checks run after the allocation and before batch creation | Caught in simulation, and no batch is created in 8Q01 for a line that cannot be posted. There is deliberately no fallback to the same code |
+| 43 | On execution the selection screen refuses a plant pair with no entry at all in `ZPTP_SLOC_MAP` | Fails at once instead of rejecting every line |
+
+New DDIC objects: table `ZPTP_SLOC_MAP` and message `024` (see the DDIC file). Fill the table
+(SM30) before the first simulation.
 
 ## What changed in v0.5 (naming conventions)
 No change to the processing. Objects follow the Sysmex D-Project *ABAP Development Standards &
@@ -104,11 +114,13 @@ The program itself reads the fields as specified.
 1. Create package `ZPTP_SPLIT_VAL` (or the package the Development Lead assigns).
 2. Create domains `ZLOT_RUN_MODE`, `ZLOT_STATUS` and data elements `ZDELOT_RUN_ID`,
    `ZDELOT_RUN_SEQ`, `ZDELOT_RUN_MODE`, `ZDELOT_STATUS`.
-3. Create tables `ZPTP_MOV_EXEC` and `ZPTP_BATCH_EXT` (column store, see the DDIC file); activate.
+3. Create tables `ZPTP_MOV_EXEC`, `ZPTP_BATCH_EXT` and `ZPTP_SLOC_MAP` (column store, see the DDIC file); activate.
    Check that data element `NUMC06` exists (used by `POSNR`).
 4. Create message class `ZPTP_SPLIT_VAL` (SE91) with the numbers listed in the DDIC file.
 5. Create report `ZPTP_SPLIT_VAL_MIG` with the title *STOCKS & BATCHES MIGRATION PROGRAM*
    (Attributes), paste source, add the selection texts and text symbols below, activate.
+   Table `ZPTP_SLOC_MAP` (step 3) and message `024` (step 4) must exist first. Generate its
+   maintenance dialog (SE54) and fill it with SM30 for the plant pair 8P01 → 8Q01.
 6. Transport requests follow Appendix C of the standard: `<Work Item ID> : <Work Item Description>`.
 
 ## Selection texts (SE38 → Goto → Text elements → Selection texts)
@@ -190,20 +202,25 @@ stock (MCHB is read per batch) and the line ends in `006`.
 locations come from the stock, the rest from the selection screen, and the movement type is
 always 301 — so adding a column changes nothing without a code change.
 
-## Storage locations (v0.2, receiving side v0.4)
+## Storage locations (v0.2, receiving side v0.6)
 The input file carries no storage location. Stock is read **per `LGORT`** (`MCHB` / `MARD`)
 and each input line is allocated over the issuing storage locations that hold the stock,
 **largest remaining first**, from a pool shared by all valuation-type lines of the same
 Material+Batch — so the same quantity is never issued twice. One material document is posted
 per input line, with **one item per issuing storage location** (`STGE_LOC`).
 
-**Receiving storage location (v0.4).** For this migration the receiving storage location in
-the target plant has the same code as the issuing one in the source plant: each item is
-posted with `MOVE_STLOC = STGE_LOC` (same `LGORT` code on both sides, only the plant differs).
-Every allocated storage location must therefore exist in 8Q01 (`T001L`); if one is missing
-the line is blocked with status `E` / `ZPTP_SPLIT_VAL 023` and nothing is posted. This check runs
-right after the allocation and before batch creation, so it also shows up in a simulation
-run. `P_LGDST` is optional: when filled it is only checked against `T001L`.
+**Receiving storage location (v0.6).** The receiving storage location of each item is read
+from table `ZPTP_SLOC_MAP` with key source plant + issuing storage location + target plant
+(buffered once per run in `GT_SLOC_MAP`), and posted in `MOVE_STLOC`. Several issuing
+locations may map to the same receiving one. For each allocated issuing location:
+
+- no mapping entry → the line is blocked with status `E` / `ZPTP_SPLIT_VAL 024`;
+- mapped location missing in 8Q01 (`T001L`) → status `E` / `ZPTP_SPLIT_VAL 023`.
+
+Nothing is posted for a blocked line, even when only one of its storage locations fails. The
+checks run right after the allocation and before batch creation, so they also show up in a
+simulation run. `P_LGDST` is optional: when filled it is only checked against `T001L`, and it
+is not used for posting. Up to v0.5 the receiving location had the same code as the issuing one.
 
 One `ZPTP_MOV_EXEC` row is written per item.
 
@@ -239,9 +256,9 @@ logged with status `E` / `ZPTP_SPLIT_VAL 005` — a partial issue is never perfo
 - **3.6 Stock transfer** — storage-location allocation, then `BAPI_GOODSMVT_CREATE`
   (mvt 301, GM code 04) + commit; one document per input line, one item per issuing storage
   location; batch fields filled only when applicable; target valuation type in
-  `MOVE_VAL_TYPE`; receiving `MOVE_STLOC` uses the same `LGORT` code as the issuing side
-  for each item, which must exist in the target plant (`ZPTP_SPLIT_VAL 023`, checked before batch
-  creation). Posting date from `P_BUDAT`. The document and its log rows are committed
+  `MOVE_VAL_TYPE`; receiving `MOVE_STLOC` is the location mapped in `ZPTP_SLOC_MAP` for
+  each item (`ZPTP_SPLIT_VAL 024` when unmapped), which must exist in the target plant
+  (`ZPTP_SPLIT_VAL 023`); both checked before batch creation. Posting date from `P_BUDAT`. The document and its log rows are committed
   in the same LUW.
 - **4. Logging** — every record written to `ZPTP_MOV_EXEC` (RUN_ID, sequence, mode, testrun,
   material/batch, plants, storage locations, BWTAR, qty, posting date, doc/year, status,
@@ -249,7 +266,7 @@ logged with status `E` / `ZPTP_SPLIT_VAL 005` — a partial issue is never perfo
 
 **Order of the checks for one line** (`F_PROCESS_LINES`): blocked by a line check → zero
 quantity (`Z`) → no stock (`006`) → *Full mode only:* segment (`003`), quantity (`004`) →
-allocation (`005`) → receiving storage locations (`023`) → batch extension (`019`, `020`, BAPI
+allocation (`005`) → receiving storage locations (`024`, `023`) → batch extension (`019`, `020`, BAPI
 message) → 301 posting. The first failure ends the line.
 
 ## Batch column (v0.2)
@@ -314,7 +331,7 @@ readable before the run starts.
   valuation type of the file is posted only when the material is split-valuated in the target
   plant; otherwise the 301 carries none and the record says so. The line-level checks (unit of
   measure, one valuation type per batch, NO_BATCH) still apply, and so do zero quantity (`Z`),
-  no stock (`006`), allocation (`005`) and receiving storage location (`023`).
+  no stock (`006`), allocation (`005`) and receiving storage location (`024`, `023`).
 
 ## RUN_ID & restart (sec.6)
 Each run uses a `RUN_ID` (entered, or auto-generated `HBM<date><time>` when blank) plus an
@@ -357,9 +374,9 @@ documents (status `S`, not a test run): the log of real postings is the audit tr
   numbers).
 - Authorization: the posting BAPIs run their own checks; `P_DEL` checks `S_TABU_NAM`. A
   report-level check (e.g. `S_TCODE` / a custom object) to be added per your security model.
-- Receiving storage location = issuing storage-location code (v0.4). 8Q01 must be created
-  with the same storage locations as 8P01 (at least those holding stock); run a simulation
-  first — any gap shows as `ZPTP_SPLIT_VAL 023`.
+- Receiving storage location from `ZPTP_SLOC_MAP` (v0.6). Every issuing storage location
+  holding stock in 8P01 needs an entry, and every mapped location must exist in 8Q01; run a
+  simulation first — gaps show as `ZPTP_SPLIT_VAL 024` (no mapping) or `023` (not in 8Q01).
 - Allocation rule largest-first; pro rata would split a line across more items and can
   introduce rounding on UoM with decimals.
 - Placeholder list for the batch column (`GC_DUMMY_BATCH`) to be confirmed against the actual

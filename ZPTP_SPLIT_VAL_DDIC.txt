@@ -1,7 +1,8 @@
-********************************************************************************
+*******************************************************************************
 * HBM : Batch Stock Transfer to New Plant (Split Valuation)
-* Program version: v0.5 (objects renamed to the Sysmex D-Project ABAP
-*                  Development Standards & Naming Conventions v1.2)
+* Program version: v0.6 (storage-location mapping table ZPTP_SLOC_MAP);
+*                  names follow the Sysmex D-Project ABAP Development
+*                  Standards & Naming Conventions v1.2
 * DDIC objects to create in SE11 BEFORE activating ZPTP_SPLIT_VAL_MIG
 * Work Stream ID: PTP (MM, Appendix B of the standard)
 * Package (suggested): ZPTP_SPLIT_VAL  (Z<WS_ID>_<name>)
@@ -11,6 +12,9 @@
 *   - ZPTP_BATCH_EXT : one line per batch handled in the target plant (created,
 *                    already existing, simulated or failed)
 * Both client-dependent, delivery class A, Display/Maintenance allowed.
+* Mapping table:
+*   - ZPTP_SLOC_MAP  : source plant + storage location -> target plant +
+*                    storage location, read by the program            [v0.6]
 ********************************************************************************
 
 ================================================================================
@@ -56,8 +60,9 @@ WERKS_SRC          WERKS_D               Source plant (8P01)
 WERKS_DST          WERKS_D               Target plant
 LGORT_SRC          LGORT_D               Issuing storage location  [v0.2]
 LGORT_DST          LGORT_D               Receiving storage location [v0.2]
-                                         (= issuing LGORT code, blank if
-                                          nothing posted)          [v0.4]
+                                         (from ZPTP_SLOC_MAP; on a 023
+                                          error the missing target;
+                                          blank if nothing posted) [v0.6]
 BWART              BWART                 Movement type (301)
 BUDAT              BUDAT                 Posting date of the movement [v0.2]
 MENGE              MENGE_D               Quantity posted on this line
@@ -107,6 +112,35 @@ ERDAT              ERDAT                 Created on
 ERZET              ERZET                 Created at
 
 ================================================================================
+TABLE  ZPTP_SLOC_MAP   "Storage location mapping for the migration     [v0.6]
+================================================================================
+Delivery class C            Data maintenance: Display/Maintenance Allowed
+Field         Key  Element / Type       Description
+--------------------------------------------------------------------------------
+MANDT          X   MANDT                 Client
+WERKS_SRC      X   WERKS_D               Source plant (8P01)
+LGORT_SRC      X   LGORT_D               Source (issuing) storage location
+WERKS_DST      X   WERKS_D               Target plant (8Q01)
+LGORT_DST          LGORT_D               Target (receiving) storage location
+
+Technical: buffering off, size category 0.
+Foreign keys (check table T001L): WERKS_SRC + LGORT_SRC, WERKS_DST + LGORT_DST.
+Maintenance: generate the table maintenance dialog (SE54, authorization group
+other than &NC&, "Log Data Changes" on) and maintain it with SM30. Delivery
+class C: entries are transported with customizing requests.
+
+The program reads the entries WHERE WERKS_SRC = P_WSRC AND WERKS_DST = P_WDST.
+Every issuing storage location holding stock in the source plant needs an
+entry; a missing one blocks the line (024). Several source storage locations
+may map to the same target storage location.
+
+Example:
+  WERKS_SRC  LGORT_SRC  WERKS_DST  LGORT_DST
+  8P01       0001       8Q01       0001
+  8P01       0002       8Q01       0001
+  8P01       QA01       8Q01       0100
+
+================================================================================
 MESSAGE CLASS  ZPTP_SPLIT_VAL  (SE91) - used by the program
 ================================================================================
 002  Zero quantity in input file - no movement created
@@ -135,6 +169,8 @@ MESSAGE CLASS  ZPTP_SPLIT_VAL  (SE91) - used by the program
 022  Update failed after commit - document &1 not posted            [v0.3]
 023  Storage location &1 does not exist in plant &2 - line not
      transferred                                                    [v0.4]
+024  No mapping for storage location &1 of plant &2 to plant &3 in
+     ZPTP_SLOC_MAP - line not transferred                           [v0.6]
 (The program passes MSGID/MSGNO together with a free text in MSGTX; the entries
  above are required so MSGID/MSGNO resolve to a text when the log is reported on.
  009 is also used when the material number cannot be converted (MATN1).

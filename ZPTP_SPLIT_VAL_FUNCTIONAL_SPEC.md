@@ -1,6 +1,6 @@
 # ZPTP_SPLIT_VAL_MIG — Functional Specification and User Guide
 
-2026-10-01 · program v0.5 (aligned on the source)
+2026-10-02 · program v0.6 (aligned on the source)
 
 ## 1. Purpose and scope
 
@@ -26,7 +26,7 @@ Program ZPTP_SPLIT_VAL_MIG transfers unrestricted stock from source plant 8P01 t
 
 **Assumptions:**
 
-- the target plant has the same storage location codes as the source plant, at least those holding stock;
+- every storage location of the source plant holding stock has an entry in the mapping table ZPTP_SLOC_MAP, pointing to a storage location that exists in the target plant;
 - file quantities are in the material's base unit of measure;
 - a batch carries a single valuation type.
 
@@ -43,7 +43,8 @@ flowchart TD
     E -- yes --> F{"Valuation segment exists in 8Q01?<br/>(Full mode only)"}
     F -- yes --> G{"File total = SAP unrestricted stock?<br/>(Full mode only)"}
     G -- yes --> H[Allocation over the issuing storage locations]
-    H --> I{Receiving storage locations exist in 8Q01?}
+    H --> M{Mapping in ZPTP_SLOC_MAP?}
+    M -- yes --> I{Mapped storage locations exist in 8Q01?}
     I -- yes --> J["Batch creation in 8Q01<br/>(batch-managed materials)"]
     J --> K[301 movement and logging in ZPTP_MOV_EXEC]
 
@@ -54,6 +55,7 @@ flowchart TD
     F -- no --> XF[E · 003]
     G -- variance --> XG[E · 004]
     H -. insufficient stock .-> XH[E · 005]
+    M -- no --> XM[E · 024]
     I -- no --> XI[E · 023]
     J -. failure .-> XJ[E · 019, 020 or BAPI message]
     K --> XK[S posted · T simulation · E failure]
@@ -74,7 +76,7 @@ flowchart TD
 3. **Valuation segment** (Full mode only): the file's valuation type must exist in the target plant (MBEW), otherwise E (003).
 4. **Quantity** (Full mode only): the file total per material + batch must equal the SAP unrestricted stock, to three decimals, otherwise E (004).
 5. **Storage location allocation**: the quantity is taken from the storage locations holding the stock, largest first. If the remaining stock does not cover the line, E (005); no partial issue is made.
-6. **Receiving storage locations**: each issuing storage location must exist with the same code in the target plant (T001L), otherwise E (023).
+6. **Receiving storage locations**: each issuing storage location is mapped to a receiving storage location through table ZPTP_SLOC_MAP (source plant + storage location → target plant + storage location). No entry: E (024). Mapped storage location missing in the target plant (T001L): E (023).
 7. **Batch creation** (batch-managed materials): if the batch does not exist in the target plant, it is created with the attributes of the source batch and the target valuation type. A batch that already exists with another valuation type blocks the line (019). In simulation, the batch is not created.
 8. **301 movement**: one material document per input file line, one item per issuing storage location, posting date = P_BUDAT. The document and its log rows are committed together.
 
@@ -103,7 +105,7 @@ The screen is titled **STOCKS & BATCHES MIGRATION PROGRAM** and has 17 parameter
 | --- | --- | --- | --- | --- |
 | P_WSRC | Source plant | yes | 8P01 | Issuing plant whose unrestricted stock is read and transferred. Must exist in T001W and differ from the target plant. |
 | P_WDST | Target plant | yes | 8Q01 | Receiving plant, where split valuation is active. Must exist in T001W. Valuation segments, batches and storage locations are checked in this plant. |
-| P_LGDST | Receiving SLoc | no | blank | Receiving storage location, checked against T001L for the target plant when filled. **Not used for posting**: each item is received in the storage location with the same code as the issuing one. |
+| P_LGDST | Receiving SLoc | no | blank | Receiving storage location, checked against T001L for the target plant when filled. **Not used for posting**: each item is received in the storage location mapped in ZPTP_SLOC_MAP. |
 | S_MATNR | Material | no | blank | Restricts processing to some materials, both in the stock read and in the file. |
 | S_CHARG | Batch | no | blank | Restricts processing to some batches, in the stock and in the file. |
 | S_MTART | Material type | no | blank | Restricts processing to some material types (MARA-MTART). A material excluded by this filter is skipped without a message. |
@@ -250,7 +252,8 @@ Each material document is committed in the same logical unit of work as its log 
 | 019 | Batch already exists in the target plant with another valuation type | E |
 | 020 | Source batch cannot be read in the source plant | E |
 | 022 | Update failed after commit, document not posted | E |
-| 023 | Storage location missing in the target plant | E |
+| 023 | Mapped storage location missing in the target plant | E |
+| 024 | No storage location mapping in ZPTP_SLOC_MAP for the issuing storage location | E |
 
 Errors returned by the SAP BAPIs (batch creation, goods movement) are logged with their own message class and number.
 
@@ -263,7 +266,7 @@ Each run has a RUN_ID and a sequence (001, 002, …) computed automatically. The
 Recommended approach:
 
 1. Run a simulation on the complete file and analyse the lines in status E.
-2. Correct the data (file, material master, valuation segments, storage locations of the target plant).
+2. Correct the data (file, material master, valuation segments, storage location mapping, storage locations of the target plant).
 3. Rerun in simulation until no blocking error remains.
 4. Run for real (P_TEST unchecked).
 5. For lines still in status E: enter the RUN_ID, check P_REPRC and rerun. Only the status E lines of the previous sequence are reprocessed.
@@ -286,7 +289,7 @@ Deletion is refused if the RUN_ID contains documents actually posted (status S, 
 
 - [ ] Storage location allocation rule: largest first (implemented) or pro rata.
 - [ ] Valuation at plant level (MBEW-BWKEY = target plant): to confirm for the HBM system.
-- [ ] Plant 8Q01 created with the same storage locations as 8P01, at least those holding stock.
+- [ ] ZPTP_SLOC_MAP filled for every storage location of 8P01 holding stock, and its target storage locations created in 8Q01.
 - [ ] Handling of a batch split across several valuation types: correct the file or use new batch numbers.
 - [ ] List of placeholder values in the batch column, to check against the actual HBM extract.
 - [ ] Batch-management indicator actually maintained by HBM: MARC-XCHPF, MARA-XCHPF or both.

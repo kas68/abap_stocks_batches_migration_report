@@ -1,6 +1,6 @@
 # ZPTP_SPLIT_VAL_MIG — Spécification fonctionnelle et guide d'utilisation
 
-01/10/2026 · programme v0.5 (aligné sur le source)
+02/10/2026 · programme v0.6 (aligné sur le source)
 
 ## 1. Objet et périmètre
 
@@ -26,7 +26,7 @@ Le programme ZPTP_SPLIT_VAL_MIG transfère le stock libre de l'usine source 8P01
 
 **Hypothèses de départ :**
 
-- l'usine cible a les mêmes codes magasin que l'usine source, au moins pour ceux qui portent du stock ;
+- chaque magasin de l'usine source qui porte du stock a une entrée dans la table de correspondance ZPTP_SLOC_MAP, vers un magasin qui existe dans l'usine cible ;
 - les quantités du fichier sont exprimées dans l'unité de base de l'article ;
 - un lot porte un seul type de valorisation.
 
@@ -43,7 +43,8 @@ flowchart TD
     E -- oui --> F{"Segment de valorisation présent dans 8Q01 ?<br/>(mode Full uniquement)"}
     F -- oui --> G{"Total du fichier = stock libre SAP ?<br/>(mode Full uniquement)"}
     G -- oui --> H[Répartition sur les magasins émetteurs]
-    H --> I{Magasins de réception présents dans 8Q01 ?}
+    H --> M{Correspondance dans ZPTP_SLOC_MAP ?}
+    M -- oui --> I{Magasins de réception présents dans 8Q01 ?}
     I -- oui --> J["Création du lot dans 8Q01<br/>(articles gérés en lot)"]
     J --> K[Mouvement 301 et historisation dans ZPTP_MOV_EXEC]
 
@@ -54,6 +55,7 @@ flowchart TD
     F -- non --> XF[E · 003]
     G -- écart --> XG[E · 004]
     H -. stock insuffisant .-> XH[E · 005]
+    M -- non --> XM[E · 024]
     I -- non --> XI[E · 023]
     J -. échec .-> XJ[E · 019, 020 ou message BAPI]
     K --> XK[S réel · T simulation · E échec]
@@ -74,7 +76,7 @@ flowchart TD
 3. **Segment de valorisation** (mode Full uniquement) : le type de valorisation du fichier doit exister dans l'usine cible (MBEW), sinon E (003).
 4. **Quantité** (mode Full uniquement) : le total du fichier par article + lot doit égaler le stock libre SAP, au millième près, sinon E (004).
 5. **Répartition sur les magasins** : la quantité est prélevée sur les magasins qui portent le stock, le plus gros d'abord. Si le stock restant ne couvre pas la ligne, E (005) ; aucune sortie partielle n'est faite.
-6. **Magasins de réception** : chaque magasin émetteur doit exister avec le même code dans l'usine cible (T001L), sinon E (023).
+6. **Magasins de réception** : chaque magasin émetteur est associé à un magasin de réception par la table ZPTP_SLOC_MAP (usine + magasin source → usine + magasin cible). Pas d'entrée : E (024). Magasin associé absent de l'usine cible (T001L) : E (023).
 7. **Création du lot** (articles gérés en lot) : si le lot n'existe pas dans l'usine cible, il est créé avec les attributs du lot source et le type de valorisation cible. Un lot déjà présent avec un autre type de valorisation bloque la ligne (019). En simulation, le lot n'est pas créé.
 8. **Mouvement 301** : un document article par ligne du fichier, un poste par magasin émetteur, date comptable = P_BUDAT. Le document et ses lignes de log sont validés ensemble.
 
@@ -103,7 +105,7 @@ L'écran porte le titre **STOCKS & BATCHES MIGRATION PROGRAM** et regroupe 17 pa
 | --- | --- | --- | --- | --- |
 | P_WSRC | Source plant | oui | 8P01 | Usine émettrice dont le stock libre est lu et transféré. Doit exister dans T001W et être différente de l'usine cible. |
 | P_WDST | Target plant | oui | 8Q01 | Usine réceptrice, où la valorisation séparée est active. Doit exister dans T001W. Les segments de valorisation, les lots et les magasins sont contrôlés dans cette usine. |
-| P_LGDST | Receiving SLoc | non | vide | Magasin de réception, contrôlé dans T001L pour l'usine cible s'il est saisi. **N'est pas utilisé pour le mouvement** : chaque poste est reçu dans le magasin de même code que le magasin émetteur. |
+| P_LGDST | Receiving SLoc | non | vide | Magasin de réception, contrôlé dans T001L pour l'usine cible s'il est saisi. **N'est pas utilisé pour le mouvement** : chaque poste est reçu dans le magasin défini dans ZPTP_SLOC_MAP. |
 | S_MATNR | Material | non | vide | Restreint le traitement à certains articles, à la fois dans le stock lu et dans le fichier. |
 | S_CHARG | Batch | non | vide | Restreint le traitement à certains lots, dans le stock et dans le fichier. |
 | S_MTART | Material type | non | vide | Restreint le traitement à certains types d'article (MARA-MTART). Un article exclu par ce filtre est ignoré sans message. |
@@ -250,7 +252,8 @@ Chaque document article est validé dans la même unité de traitement que ses l
 | 019 | Lot déjà présent dans l'usine cible avec un autre type de valorisation | E |
 | 020 | Lot source illisible dans l'usine source | E |
 | 022 | Mise à jour échouée après validation, document non posté | E |
-| 023 | Magasin absent de l'usine cible | E |
+| 023 | Magasin associé absent de l'usine cible | E |
+| 024 | Pas de correspondance dans ZPTP_SLOC_MAP pour le magasin émetteur | E |
 
 Les erreurs renvoyées par les BAPI SAP (création de lot, mouvement) sont reprises avec leur propre classe et numéro de message.
 
@@ -263,7 +266,7 @@ Chaque exécution porte un RUN_ID et une séquence (001, 002, …) calculée aut
 Démarche recommandée :
 
 1. Lancer une simulation sur le fichier complet et analyser les lignes en E.
-2. Corriger les données (fichier, fiche article, segments, magasins de l'usine cible).
+2. Corriger les données (fichier, fiche article, segments, correspondance des magasins, magasins de l'usine cible).
 3. Relancer en simulation jusqu'à ne plus avoir d'erreur bloquante.
 4. Lancer l'exécution réelle (P_TEST décoché).
 5. Pour les lignes restées en E : saisir le RUN_ID, cocher P_REPRC et relancer. Seules les lignes en E de la séquence précédente sont retraitées.
@@ -286,7 +289,7 @@ La suppression est refusée si le RUN_ID contient des documents réellement post
 
 - [ ] Règle de répartition sur les magasins : le plus gros d'abord (en place) ou au prorata.
 - [ ] Valorisation au niveau usine (MBEW-BWKEY = usine cible) : à confirmer pour le système HBM.
-- [ ] Usine 8Q01 créée avec les mêmes magasins que 8P01, au moins ceux qui portent du stock.
+- [ ] ZPTP_SLOC_MAP renseignée pour chaque magasin de 8P01 qui porte du stock, et ses magasins cibles créés dans 8Q01.
 - [ ] Traitement d'un lot réparti sur plusieurs types de valorisation : correction du fichier ou nouveaux numéros de lot.
 - [ ] Liste des valeurs fictives de la colonne lot, à vérifier sur l'extraction HBM réelle.
 - [ ] Indicateur de gestion en lot réellement tenu par HBM : MARC-XCHPF, MARA-XCHPF ou les deux.

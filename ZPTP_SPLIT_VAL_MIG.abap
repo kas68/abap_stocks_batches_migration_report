@@ -3,7 +3,7 @@
 *&---------------------------------------------------------------------*
 *& Project : HBM - Split Valuation migration
 *& Scope   : Clearing of batch stocks / Inter-plant transfer
-*& Version : v0.5
+*& Version : v0.6
 *& Package : ZPTP_SPLIT_VAL        Message class: ZPTP_SPLIT_VAL
 *&
 *&---------------------------------------------------------------------*
@@ -33,10 +33,12 @@
 *&   3.6 Storage-location allocation, then post 301 with
 *&       BAPI_GOODSMVT_CREATE (one document per input line, one ITEM per
 *&       issuing storage location) + BAPI_TRANSACTION_COMMIT. Each item
-*&       is received in the storage location of the same code in the
-*&       target plant, which must exist there (T001L). The allocation
-*&       and this check run before batch creation.
-*&   4.  Historize every record in ZPTP_MOV_EXEC (one row per line and
+*&       is received in the target storage location given by the
+*&       mapping table ZPTP_SLOC_MAP (source plant + storage location ->
+*&       target plant + storage location), which must exist in the
+*&       target plant (T001L). The allocation and these checks run
+*&       before batch creation.
+*&   4.  Log every record in ZPTP_MOV_EXEC (one row per line and
 *&       issuing storage location).
 *&
 *& Execution strategies (sec.5):
@@ -62,7 +64,8 @@
 *& Assumptions
 *&---------------------------------------------------------------------*
 *& - Valuation level = plant (MBEW-BWKEY = target plant).
-*& - The target plant has the same storage-location codes as the source.
+*& - Every issuing storage location holding stock has an entry in
+*&   ZPTP_SLOC_MAP for the source / target plant pair.
 *& - File quantities are in the material base unit.
 *& - One valuation type per batch.
 *&
@@ -71,8 +74,11 @@
 *&---------------------------------------------------------------------*
 *& - Storage-location allocation largest-first (pro rata to be confirmed).
 *& - Logs committed in the same LUW as each posting.
-*& - Allocation and the target storage-location check run before batch
-*&   creation, so no batch is created for a line that cannot be posted.
+*& - Allocation, the storage-location mapping and the target
+*&   storage-location check run before batch creation, so no batch is
+*&   created for a line that cannot be posted.
+*& - No mapping entry blocks the line (024): there is no fallback to the
+*&   same storage-location code.
 *&
 *&---------------------------------------------------------------------*
 *& Related developments
@@ -214,8 +220,9 @@ TYPES: gtt_stock_loc TYPE SORTED TABLE OF gty_stock_loc
 
 * allocation of one input line over the issuing storage locations
 TYPES: BEGIN OF gty_alloc,
-         lgort TYPE lgort_d,
-         menge TYPE menge_d,
+         lgort     TYPE lgort_d,
+         menge     TYPE menge_d,
+         lgort_dst TYPE lgort_d,  " receiving location from ZPTP_SLOC_MAP [v0.6]
        END OF gty_alloc.
 TYPES: gtt_alloc TYPE STANDARD TABLE OF gty_alloc WITH DEFAULT KEY.
 
@@ -424,6 +431,14 @@ DATA: gt_input_raw TYPE gtt_input_raw,
 * storage locations of the target plant (T001L), buffered once [v0.4-27]
 DATA: gt_lgort_dst TYPE SORTED TABLE OF lgort_d WITH UNIQUE KEY table_line.
 
+* storage-location mapping source -> target for the plant pair of the
+* run (ZPTP_SLOC_MAP), buffered once                          [v0.6-41]
+TYPES: BEGIN OF gty_sloc_map,
+         lgort_src TYPE lgort_d,
+         lgort_dst TYPE lgort_d,
+       END OF gty_sloc_map.
+DATA: gt_sloc_map TYPE SORTED TABLE OF gty_sloc_map WITH UNIQUE KEY lgort_src.
+
 * reference fields for SELECT-OPTIONS (FOR needs a field, not a table)
 DATA: gv_sel_matnr TYPE matnr,
       gv_sel_charg TYPE charg_d,
@@ -439,7 +454,7 @@ SELECTION-SCREEN BEGIN OF BLOCK b0 WITH FRAME TITLE TEXT-t01.
 SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-b01.
   PARAMETERS: p_wsrc TYPE werks_d OBLIGATORY DEFAULT '8P01',   " source plant
               p_wdst TYPE werks_d OBLIGATORY DEFAULT '8Q01',    " target plant
-              p_lgdst TYPE lgort_d.        " optional, T001L check only; not posted [v0.4-26]
+              p_lgdst TYPE lgort_d.        " optional, T001L check only; not posted [v0.4-26, v0.6]
   SELECT-OPTIONS: s_matnr FOR gv_sel_matnr,                     " optional filter
                   s_charg FOR gv_sel_charg,
                   s_mtart FOR gv_sel_mtart.                     " material type
@@ -630,13 +645,21 @@ FORM f_check_screen.
   ENDIF.
 
 * --- receiving storage location: optional, not used for posting since
-*     each item is received in the same storage-location code   [v0.4-26]
+*     each item's receiving location comes from ZPTP_SLOC_MAP [v0.4-26, v0.6]
   IF p_lgdst IS NOT INITIAL.
     SELECT SINGLE lgort FROM t001l INTO @DATA(lv_l)
       WHERE werks = @p_wdst AND lgort = @p_lgdst.
     IF sy-subrc <> 0.
       MESSAGE |Storage location { p_lgdst } does not exist in plant { p_wdst } (T001L)| TYPE 'E'.
     ENDIF.
+  ENDIF.
+
+* --- storage-location mapping for the plant pair             [v0.6-41]
+  SELECT SINGLE lgort_src FROM zptp_sloc_map INTO @DATA(lv_m)
+    WHERE werks_src = @p_wsrc AND werks_dst = @p_wdst.
+  IF sy-subrc <> 0.
+    MESSAGE |No storage location mapping from plant { p_wsrc } to plant { p_wdst } | &&
+            |in table ZPTP_SLOC_MAP| TYPE 'E'.
   ENDIF.
 
 * --- separator --------------------------------------------------------
@@ -684,11 +707,17 @@ ENDFORM.
 *&---------------------------------------------------------------------*
 FORM f_init.
 
-  CLEAR: gt_out, gt_mov_log, gv_posnr, gt_lgort_dst.
+  CLEAR: gt_out, gt_mov_log, gv_posnr, gt_lgort_dst, gt_sloc_map.
 
 * storage locations of the target plant                     [v0.4-27]
   SELECT lgort FROM t001l INTO TABLE @gt_lgort_dst
     WHERE werks = @p_wdst.
+
+* storage-location mapping for the plant pair                [v0.6-41]
+  SELECT lgort_src, lgort_dst FROM zptp_sloc_map
+    INTO CORRESPONDING FIELDS OF TABLE @gt_sloc_map
+    WHERE werks_src = @p_wsrc
+      AND werks_dst = @p_wdst.
 
   gv_run_mode = COND #( WHEN p_dir = abap_true THEN gc_mode_dir
                                                ELSE gc_mode_full ).
@@ -714,7 +743,7 @@ FORM f_init.
   WRITE: / 'RUN_ID:', gv_run_id, 'Seq:', gv_run_seq,
            'Mode:', COND string( WHEN gv_run_mode = gc_mode_dir
                                  THEN 'DIRECT' ELSE 'FULL' ).
-  WRITE: / 'Transfer:', p_wsrc, '->', p_wdst, '(same storage location codes)',
+  WRITE: / 'Transfer:', p_wsrc, '->', p_wdst, '(storage locations mapped by ZPTP_SLOC_MAP)',
            'Posting date:', p_budat.
   IF p_test = abap_true.
     WRITE: / '*** SIMULATION (TESTRUN) - no posting ***' COLOR COL_TOTAL.
@@ -1637,7 +1666,8 @@ FORM f_process_lines.
         lv_vt    TYPE bwtar_d,
         lv_cerr  TYPE abap_bool,
         lv_cmsg  TYPE bapi_msg,
-        lv_lgmis TYPE lgort_d.                          " [v0.4-27]
+        lv_lgmis TYPE lgort_d,                          " [v0.4-27]
+        lv_nomap TYPE lgort_d.                          " [v0.6-41]
 
 * memorised batch-extension result per MATNR + CHARG          [v0.2 - 6]
   DATA: lt_done TYPE gtt_done,
@@ -1740,22 +1770,40 @@ FORM f_process_lines.
       CONTINUE.
     ENDIF.
 
-*   --- 3.6a' Receiving storage locations exist in the target plant ----
-*   Each item is received in the same storage-location code.  [v0.4-27]
-    CLEAR lv_lgmis.
-    LOOP AT lt_alloc INTO ls_alloc.
-      READ TABLE gt_lgort_dst TRANSPORTING NO FIELDS
-           WITH TABLE KEY table_line = ls_alloc-lgort.
+*   --- 3.6a' Receiving storage locations ----------------------------
+*   Each issuing storage location is mapped to its receiving location
+*   through ZPTP_SLOC_MAP, which must exist in the target plant.
+*                                                       [v0.4-27, v0.6-41]
+    CLEAR: lv_lgmis, lv_nomap.
+    LOOP AT lt_alloc ASSIGNING FIELD-SYMBOL(<ls_alloc>).
+      READ TABLE gt_sloc_map INTO DATA(ls_map)
+           WITH TABLE KEY lgort_src = <ls_alloc>-lgort.
       IF sy-subrc <> 0.
-        lv_lgmis = ls_alloc-lgort.
+        lv_nomap = <ls_alloc>-lgort.
+        EXIT.
+      ENDIF.
+      <ls_alloc>-lgort_dst = ls_map-lgort_dst.
+      READ TABLE gt_lgort_dst TRANSPORTING NO FIELDS
+           WITH TABLE KEY table_line = <ls_alloc>-lgort_dst.
+      IF sy-subrc <> 0.
+        lv_lgmis = <ls_alloc>-lgort_dst.
+        ls_out-lgort_src = <ls_alloc>-lgort.
         EXIT.
       ENDIF.
     ENDLOOP.
+    IF lv_nomap IS NOT INITIAL.
+      ls_out-status    = gc_st_err.
+      ls_out-lgort_src = lv_nomap.
+      ls_out-message   = |No mapping for storage location { lv_nomap } of plant | &&
+                         |{ p_wsrc } to plant { p_wdst } in ZPTP_SLOC_MAP - line not transferred|.
+      PERFORM f_add_log USING gc_msgid '024' 'E' CHANGING ls_out.
+      CONTINUE.
+    ENDIF.
     IF lv_lgmis IS NOT INITIAL.
       ls_out-status    = gc_st_err.
-      ls_out-lgort_src = lv_lgmis.
-      ls_out-message   = |Storage location { lv_lgmis } does not exist in plant | &&
-                         |{ p_wdst } - line not transferred|.
+      ls_out-lgort_dst = lv_lgmis.
+      ls_out-message   = |Storage location { lv_lgmis } (mapped from { ls_out-lgort_src }) | &&
+                         |does not exist in plant { p_wdst } - line not transferred|.
       PERFORM f_add_log USING gc_msgid '023' 'E' CHANGING ls_out.
       CONTINUE.
     ENDIF.
@@ -1818,7 +1866,7 @@ FORM f_process_lines.
 *   one log row per issuing storage location
     LOOP AT lt_alloc INTO ls_alloc.
       ls_out-lgort_src  = ls_alloc-lgort.
-      ls_out-lgort_dst  = ls_alloc-lgort.      " same code in target plant [v0.4-26]
+      ls_out-lgort_dst  = ls_alloc-lgort_dst.  " from ZPTP_SLOC_MAP      [v0.6-41]
       ls_out-menge_post = ls_alloc-menge.
       PERFORM f_add_log USING lv_id lv_no lv_ty CHANGING ls_out.
     ENDLOOP.
@@ -1964,8 +2012,9 @@ ENDFORM.
 *&      One material document per input line, one ITEM per issuing
 *&      storage location. STGE_LOC = issuing location from the
 *&      allocation.                                          [v0.2 - 1]
-*&      MOVE_STLOC = the same storage-location code in the target
-*&      plant (was P_LGDST up to v0.3).                       [v0.4-26]
+*&      MOVE_STLOC = the receiving storage location mapped in
+*&      ZPTP_SLOC_MAP (same code up to v0.5, P_LGDST up to v0.3).
+*&                                                           [v0.6-41]
 *&      The target valuation type goes in MOVE_VAL_TYPE (receiving
 *&      side); VAL_TYPE (issuing side) stays blank.          [v0.3-15]
 *&      No COMMIT here: the caller writes the log rows and commits them
@@ -2009,7 +2058,7 @@ FORM f_post_301 USING is_raw   TYPE gty_input_raw
     ls_item-entry_qnt  = ls_alloc-menge.
     ls_item-entry_uom  = is_raw-meins.
     ls_item-move_plant = p_wdst.
-    ls_item-move_stloc = ls_alloc-lgort.      " same code in target plant [v0.4-26]
+    ls_item-move_stloc = ls_alloc-lgort_dst.  " from ZPTP_SLOC_MAP      [v0.6-41]
 *   receiving valuation type; the issuing side (VAL_TYPE) stays blank,
 *   the source plant is not split-valuated              [v0.3-15, 18]
     ls_item-move_val_type = iv_bwtar.

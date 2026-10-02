@@ -61,7 +61,7 @@ This ensures that the receiving batch has the correct master data and receives t
 ### 5. Allocates stock per storage location
 The program does not just move a total quantity; it distributes the stock across the issuing storage locations that actually hold it. This is done before posting so that each 301 movement is consistent with the real stock distribution in the source plant.
 
-The receiving storage location is aligned with the same storage location code, while the plant changes from 8P01 to 8Q01.
+The receiving storage location in 8Q01 is taken from a mapping table (ZPTP_SLOC_MAP) that pairs each storage location of 8P01 with a storage location of 8Q01. A storage location without a mapping blocks the line before anything is posted.
 
 ### 6. Posts the 301 movement
 Once validation and allocation are complete, the program creates one goods movement per input line using 301 movement type. Each movement can include one item per issuing storage location.
