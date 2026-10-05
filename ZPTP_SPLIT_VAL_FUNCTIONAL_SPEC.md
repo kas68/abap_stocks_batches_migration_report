@@ -97,7 +97,7 @@ In simulation (P_TEST checked, the default), the program runs every check and ca
 
 ## 3. Selection screen
 
-The screen is titled **STOCKS & BATCHES MIGRATION PROGRAM** and has 17 parameters in four blocks. Each parameter is labelled *label (technical name)*, for example *Source plant (P_WSRC)*. Consistency checks run only on execution (F8, background job, print), not on every change on the screen. When the deletion option P_DEL is checked, only the RUN_ID is checked.
+The screen is titled **STOCKS & BATCHES MIGRATION PROGRAM** and has 18 parameters in four blocks. Each parameter is labelled *label (technical name)*, for example *Source plant (P_WSRC)*. Consistency checks run only on execution (F8, background job, print), not on every change on the screen. When the deletion option P_DEL is checked, only the RUN_ID is checked.
 
 ### 3.1 Block "Organizational data"
 
@@ -105,7 +105,6 @@ The screen is titled **STOCKS & BATCHES MIGRATION PROGRAM** and has 17 parameter
 | --- | --- | --- | --- | --- |
 | P_WSRC | Source plant | yes | 8P01 | Issuing plant whose unrestricted stock is read and transferred. Must exist in T001W and differ from the target plant. |
 | P_WDST | Target plant | yes | 8Q01 | Receiving plant, where split valuation is active. Must exist in T001W. Valuation segments, batches and storage locations are checked in this plant. |
-| P_LGDST | Receiving SLoc | no | blank | Receiving storage location, checked against T001L for the target plant when filled. **Not used for posting**: each item is received in the storage location mapped in ZPTP_SLOC_MAP. |
 | S_MATNR | Material | no | blank | Restricts processing to some materials, both in the stock read and in the file. |
 | S_CHARG | Batch | no | blank | Restricts processing to some batches, in the stock and in the file. |
 | S_MTART | Material type | no | blank | Restricts processing to some material types (MARA-MTART). A material excluded by this filter is skipped without a message. |
@@ -131,12 +130,14 @@ With any of the three filters S_MATNR, S_CHARG or S_MTART, the "SAP stock missin
 | P_FULL | Full validation | exclusive choice | checked | Standard mode: all checks apply (see 2.3). |
 | P_DIR | Direct transfer | exclusive choice | — | Skips the valuation segment check, the quantity check and the reverse reconciliation (see 2.3). |
 | P_TEST | Simulation | no | checked | Checked: simulation, no stock posting and no batch creation. Unchecked: real run. |
+| S_STAT | ALV status | no | blank | Restricts the ALV list to the selected status values (see 5.1); several values, ranges or exclusions can be entered, and F4 lists the values with their meaning. Blank: all values. Display only: every line is still processed and logged in ZPTP_MOV_EXEC. If no row matches, a message is shown instead of the list. |
 
 ### 3.4 Block "Maintenance"
 
 | Parameter | Label | Mandatory | Default | Meaning and behaviour |
 | --- | --- | --- | --- | --- |
 | P_DEL | Delete run ID | no | unchecked | Deletes the rows of the entered RUN_ID from both log tables, after confirmation. No other processing is run. See section 6. |
+| P_CLR | Delete all logs before the run | no | unchecked | Empties ZPTP_MOV_EXEC and ZPTP_BATCH_EXT completely, then runs the migration normally (the RUN_ID sequence restarts at 001). Needs the table authorization (S_TABU_NAM) on both tables and a confirmation popup (none in background). The log of runs that posted documents is deleted too. Cannot be combined with P_REPRC. |
 
 ## 4. Input file format
 
@@ -217,7 +218,11 @@ At the end of the run, the program displays an ALV list with one row per process
 
 ### 5.2 ALV list
 
-Columns displayed: status, material, batch, batch-management flag, valuation type, issuing plant and storage location, receiving plant and storage location, posted quantity, unit, file quantity, SAP stock, variance, material document and year, message class and number, message text, RUN_ID, sequence, mode and simulation flag.
+The list can be restricted to some statuses with S_STAT (blank = all). Rows are grouped by status in this order: T, S, E, W, Z, I, X, so the simulated and posted lines come first; the original order is kept inside a status.
+
+Columns displayed: status, material, batch, batch-management flag, valuation type, issuing plant and storage location, receiving plant and storage location, posted quantity, unit, file quantity, SAP stock, variance, material document and year, message type, class and number, message text, RUN_ID, sequence, mode, simulation flag and batch-normalised flag (the batch value of the file was reduced to blank).
+
+The issuing storage location is where the stock currently is; the receiving storage location is the one mapped to it in ZPTP_SLOC_MAP. Both are also shown, one row per issuing storage location holding stock, for a line rejected before the allocation (statuses Z and E for messages 002 to 005); the receiving location is blank when the issuing location has no mapping. A line with no stock (006) has no storage location.
 
 ### 5.3 Log tables
 
@@ -279,10 +284,12 @@ P_DEL checked with a RUN_ID deletes that RUN_ID's rows from ZPTP_MOV_EXEC and ZP
 
 Deletion is refused if the RUN_ID contains documents actually posted (status S, not a simulation): the log of real postings is the audit trail. It requires authorization S_TABU_NAM (activity 02, table ZPTP_MOV_EXEC).
 
+P_CLR checked empties both log tables completely before a normal run, whatever the RUN_ID, and also removes the log of real postings. It requires S_TABU_NAM (activity 02) on ZPTP_MOV_EXEC and ZPTP_BATCH_EXT, a confirmation popup in dialog mode, and cannot be combined with P_REPRC.
+
 ### 6.3 Authorizations
 
 - Goods movements and batch creation: standard checks of the SAP BAPIs (BAPI_GOODSMVT_CREATE, BAPI_BATCH_CREATE).
-- Deletion of a RUN_ID: S_TABU_NAM.
+- Deletion of a RUN_ID or of all the logs (P_CLR): S_TABU_NAM.
 - No program-specific authorization check on execution is in place yet.
 
 ### 6.4 Points to confirm

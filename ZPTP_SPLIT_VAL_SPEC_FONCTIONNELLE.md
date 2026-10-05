@@ -97,7 +97,7 @@ En simulation (P_TEST coché, valeur par défaut), le programme exécute tous le
 
 ## 3. Écran de sélection
 
-L'écran porte le titre **STOCKS & BATCHES MIGRATION PROGRAM** et regroupe 17 paramètres en quatre blocs. Chaque paramètre est libellé *libellé (nom technique)*, par exemple *Source plant (P_WSRC)* ; les libellés de l'écran sont en anglais. Les contrôles de cohérence ne s'exécutent qu'au lancement (F8, job d'arrière-plan, impression), pas à chaque changement de sélection. Quand l'option de suppression P_DEL est cochée, seul le RUN_ID est contrôlé.
+L'écran porte le titre **STOCKS & BATCHES MIGRATION PROGRAM** et regroupe 18 paramètres en quatre blocs. Chaque paramètre est libellé *libellé (nom technique)*, par exemple *Source plant (P_WSRC)* ; les libellés de l'écran sont en anglais. Les contrôles de cohérence ne s'exécutent qu'au lancement (F8, job d'arrière-plan, impression), pas à chaque changement de sélection. Quand l'option de suppression P_DEL est cochée, seul le RUN_ID est contrôlé.
 
 ### 3.1 Bloc « Organizational data »
 
@@ -105,7 +105,6 @@ L'écran porte le titre **STOCKS & BATCHES MIGRATION PROGRAM** et regroupe 17 pa
 | --- | --- | --- | --- | --- |
 | P_WSRC | Source plant | oui | 8P01 | Usine émettrice dont le stock libre est lu et transféré. Doit exister dans T001W et être différente de l'usine cible. |
 | P_WDST | Target plant | oui | 8Q01 | Usine réceptrice, où la valorisation séparée est active. Doit exister dans T001W. Les segments de valorisation, les lots et les magasins sont contrôlés dans cette usine. |
-| P_LGDST | Receiving SLoc | non | vide | Magasin de réception, contrôlé dans T001L pour l'usine cible s'il est saisi. **N'est pas utilisé pour le mouvement** : chaque poste est reçu dans le magasin défini dans ZPTP_SLOC_MAP. |
 | S_MATNR | Material | non | vide | Restreint le traitement à certains articles, à la fois dans le stock lu et dans le fichier. |
 | S_CHARG | Batch | non | vide | Restreint le traitement à certains lots, dans le stock et dans le fichier. |
 | S_MTART | Material type | non | vide | Restreint le traitement à certains types d'article (MARA-MTART). Un article exclu par ce filtre est ignoré sans message. |
@@ -131,12 +130,14 @@ Avec l'un des trois filtres S_MATNR, S_CHARG ou S_MTART, le rapprochement « sto
 | P_FULL | Full validation | choix exclusif | coché | Mode standard : tous les contrôles s'appliquent (voir 2.3). |
 | P_DIR | Direct transfer | choix exclusif | — | Saute le contrôle du segment de valorisation, le contrôle de quantité et le rapprochement inverse (voir 2.3). |
 | P_TEST | Simulation | non | coché | Coché : simulation, aucune écriture de stock ni création de lot. Décoché : exécution réelle. |
+| S_STAT | ALV status | non | vide | Restreint la liste ALV aux statuts sélectionnés (voir 5.1) ; plusieurs valeurs, intervalles ou exclusions peuvent être saisis, et F4 liste les valeurs avec leur signification. Vide : toutes les valeurs. Affichage uniquement : toutes les lignes sont traitées et historisées dans ZPTP_MOV_EXEC. Si aucune ligne ne correspond, un message s'affiche à la place de la liste. |
 
 ### 3.4 Bloc « Maintenance »
 
 | Paramètre | Libellé | Obligatoire | Défaut | Signification et fonctionnement |
 | --- | --- | --- | --- | --- |
 | P_DEL | Delete run ID | non | non coché | Supprime les lignes du RUN_ID saisi dans les deux tables de log, après confirmation. Aucun autre traitement n'est exécuté. Voir la section 6. |
+| P_CLR | Delete all logs before the run | non | non coché | Vide entièrement ZPTP_MOV_EXEC et ZPTP_BATCH_EXT, puis exécute normalement la migration (la séquence du RUN_ID repart à 001). Exige l'autorisation sur les tables (S_TABU_NAM) pour les deux tables et une fenêtre de confirmation (aucune en arrière-plan). Le log des exécutions qui ont posté des documents est supprimé aussi. Incompatible avec P_REPRC. |
 
 ## 4. Format du fichier d'entrée
 
@@ -217,7 +218,11 @@ En mode Full Validation, la somme des quantités du fichier pour un même articl
 
 ### 5.2 Liste ALV
 
-Colonnes affichées : statut, article, lot, indicateur de gestion en lot, type de valorisation, usine et magasin émetteurs, usine et magasin récepteurs, quantité postée, unité, quantité du fichier, stock SAP, écart, document article et exercice, classe et numéro de message, texte du message, RUN_ID, séquence, mode et indicateur de simulation.
+La liste peut être restreinte à certains statuts avec S_STAT (vide = tous). Les lignes sont regroupées par statut dans cet ordre : T, S, E, W, Z, I, X, de sorte que les lignes simulées et postées apparaissent en premier ; l'ordre d'origine est conservé à l'intérieur d'un statut.
+
+Colonnes affichées : statut, article, lot, indicateur de gestion en lot, type de valorisation, usine et magasin émetteurs, usine et magasin récepteurs, quantité postée, unité, quantité du fichier, stock SAP, écart, document article et exercice, type, classe et numéro de message, texte du message, RUN_ID, séquence, mode, indicateur de simulation et indicateur de lot normalisé (la valeur du lot du fichier a été ramenée à vide).
+
+Le magasin émetteur est celui où se trouve actuellement le stock ; le magasin récepteur est celui qui lui est associé dans ZPTP_SLOC_MAP. Les deux sont aussi affichés, une ligne par magasin émetteur détenant du stock, pour une ligne rejetée avant la répartition (statuts Z et E pour les messages 002 à 005) ; le magasin récepteur est vide si le magasin émetteur n'a pas d'association. Une ligne sans stock (006) n'a pas de magasin.
 
 ### 5.3 Tables de log
 
@@ -279,10 +284,12 @@ P_DEL coché avec un RUN_ID supprime les lignes de ce RUN_ID dans ZPTP_MOV_EXEC 
 
 La suppression est refusée si le RUN_ID contient des documents réellement postés (statut S hors simulation) : le log des mouvements réels sert de piste d'audit. Elle exige l'autorisation S_TABU_NAM (activité 02, table ZPTP_MOV_EXEC).
 
+P_CLR coché vide entièrement les deux tables de log avant une exécution normale, quel que soit le RUN_ID, et supprime aussi le log des postings réels. Il exige S_TABU_NAM (activité 02) sur ZPTP_MOV_EXEC et ZPTP_BATCH_EXT, une fenêtre de confirmation en mode dialogue, et ne peut pas être combiné avec P_REPRC.
+
 ### 6.3 Autorisations
 
 - Mouvements et création de lots : contrôles standard des BAPI SAP (BAPI_GOODSMVT_CREATE, BAPI_BATCH_CREATE).
-- Suppression d'un RUN_ID : S_TABU_NAM.
+- Suppression d'un RUN_ID ou de tous les logs (P_CLR) : S_TABU_NAM.
 - Aucun contrôle d'autorisation propre au programme n'est encore en place au lancement.
 
 ### 6.4 Points à confirmer

@@ -85,7 +85,6 @@ The screen has four blocks. Its checks run only when you execute (F8, background
 | --- | --- | --- | --- |
 | Source plant (P_WSRC) | 8P01 | yes | Plant whose unrestricted stock is moved. Must exist and differ from the target plant. |
 | Target plant (P_WDST) | 8Q01 | yes | Split-valuated receiving plant. Segments, batches and storage locations are checked here. |
-| Receiving SLoc (P_LGDST) | blank | no | Leave blank. If filled, it is only checked against T001L; it is never used for posting. Each item is received in the storage location mapped in ZPTP_SLOC_MAP. |
 | Material (S_MATNR) | blank | no | Restricts the run to some materials, in the stock and in the file. |
 | Batch (S_CHARG) | blank | no | Restricts the run to some batches. |
 | Material type (S_MTART) | blank | no | Restricts the run to some material types. Excluded materials are skipped without a message. |
@@ -111,12 +110,14 @@ Any of the three filters also narrows the "SAP stock missing from the file" chec
 | Full validation (P_FULL) | selected | one of the two | Standard mode: every check applies. Use it for the migration. |
 | Direct transfer (P_DIR) | — | one of the two | Skips the valuation segment check, the quantity check and the "SAP stock missing from the file" check. Only for materials whose split valuation is not yet active in the target plant, and only when agreed. |
 | Simulation (P_TEST) | on | no | On: everything is checked, nothing is posted and no batch is created. Off: real posting. |
+| ALV status (S_STAT) | blank | no | Shows only the selected statuses in the result list. F4 lists the values with their meaning and lets you tick several; the Multiple Selection button accepts ranges and exclusions. Blank shows every status. Only the display is filtered: all lines are still processed and logged. |
 
 ### 3.4 Maintenance
 
 | Field | Default | Required | What to enter |
 | --- | --- | --- | --- |
 | Delete run ID (P_DEL) | off | no | With a RUN_ID, deletes that run's rows from both log tables after a confirmation. Nothing else runs. Refused when the run has real postings. |
+| Delete all logs before the run (P_CLR) | off | no | Empties both log tables completely before the migration starts, after a confirmation (no popup in a background job). The log of runs that posted documents is deleted too, so use it only when the history is no longer needed. Needs the table authorization. Cannot be used with Reprocess errors. |
 
 Save your settings as a variant (Goto > Variants > Save as Variant), for example one variant for simulation and one for the real run. A background job needs a variant.
 
@@ -216,14 +217,17 @@ The ALV list has one row per file line and per issuing storage location; the Sta
 
 | Column | Content |
 | --- | --- |
-| Status, Message, Msg Class, Msg No | Result of the line and the message that explains it |
+| Status, Message, Msg Type, Msg Class, Msg No | Result of the line and the message that explains it |
 | Material, Batch, BatchMgd, Val.Type | The file line; BatchMgd = X for a batch-managed material |
-| Src Plant, Src SLoc | Issuing plant and storage location (from SAP stock) |
-| Dst Plant, Dst SLoc | Receiving plant and storage location (from ZPTP_SLOC_MAP; on a 023 error the missing target; blank when nothing was posted) |
+| Src Plant, Src SLoc | Issuing plant and storage location, where the stock currently is (from SAP stock). A line rejected before the allocation (002 to 005) shows one row per storage location holding stock |
+| Dst Plant, Dst SLoc | Receiving plant and storage location, where the stock will be moved (from ZPTP_SLOC_MAP; on a 023 error the missing target; blank when the source location has no mapping or the line has no stock) |
 | Qty Posted, UoM | Quantity of this item, in the base unit |
 | File Qty, SAP Stock, Variance | File total, unrestricted stock in 8P01 and the difference, per material and batch |
 | Mat.Doc, Year | 301 material document, or SIMULATED |
 | RUN_ID, Seq, Mode, Simulation | Run identification: sequence, FULL or DIRECT mode, X for a simulation |
+| Batch normalised | X when the batch value of the file was reduced to blank (see message 012) |
+
+The rows are grouped by status: T and S first, then E, W, Z, I and X. Inside a status the order of the file is kept.
 
 Useful ALV functions: filter on Status, sort by Msg No, subtotal Qty Posted by material, and export to a spreadsheet (List > Export) for the business review.
 

@@ -15,6 +15,8 @@ This repository holds the code only; version history is kept in git (the former
 - `ZPTP_SPLIT_VAL_FUNCTIONAL_SPEC.md` — functional specification and user guide (processing,
   selection-screen parameters, input file format, results).
 - `ZPTP_SPLIT_VAL_SPEC_FONCTIONNELLE.md` — the same specification and user guide in French.
+- `ZPTP_SPLIT_VAL_MIG_UTILITY.abap` — report that builds the input file from SAP data (see
+  "Utility report" below).
 - `HIGH_LEVEL_OVERVIEW.md` — non-technical overview of the program.
 - `SAP ABAP Development Standard and Namimg Conventions.docx` — the customer's development
   standards and naming conventions (Sysmex D-Project, v1.2).
@@ -25,6 +27,17 @@ This repository holds the code only; version history is kept in git (the former
 | 41 | The receiving storage location of each 301 item is read from the new table `ZPTP_SLOC_MAP` (source plant + storage location → target plant + storage location) instead of reusing the issuing code. `MOVE_STLOC` and `LGORT_DST` carry the mapped location | The storage locations of 8Q01 do not necessarily have the codes of 8P01 |
 | 42 | An issuing storage location without a mapping entry blocks the line with `ZPTP_SPLIT_VAL 024`; a mapped location missing in the target plant (`T001L`) blocks it with `023`. Both checks run after the allocation and before batch creation | Caught in simulation, and no batch is created in 8Q01 for a line that cannot be posted. There is deliberately no fallback to the same code |
 | 43 | On execution the selection screen refuses a plant pair with no entry at all in `ZPTP_SLOC_MAP` | Fails at once instead of rejecting every line |
+
+Later changes to the selection screen and the ALV (still under v0.6):
+
+| # | Change | Why |
+|---|---|---|
+| 44 | `P_LGDST` removed | It was only checked, never used for posting |
+| 45 | `S_STAT` (ALV status filter, blank = all) with an F4 help | Show only some statuses; display only, the log is complete |
+| 46 | ALV grouped by status (T, S, E, W, Z, I, X); `MSGTY` and `NORMBAT` columns added | Simulated and posted lines first; all row information visible |
+| 47 | Rows rejected before the allocation (002 to 005) and batch-extension failures show the source and mapped target storage locations | The ALV always shows where the stock is and where it goes |
+| 48 | `P_CLR`: empties both log tables before the run | Restart from a clean log (needs `S_TABU_NAM`, confirmation) |
+| 49 | Batch BAPIs called with a `BAPIBATCHKEY-MATERIAL` variable | Type mismatch dump in `F_EXTEND_BATCH` |
 
 New DDIC objects: table `ZPTP_SLOC_MAP` and message `024` (see the DDIC file). Fill the table
 (SM30) before the first simulation.
@@ -132,7 +145,6 @@ leave *Dictionary Ref.* unticked, otherwise SAP replaces the text with the data 
 |------|------|
 | P_WSRC | Source plant (P_WSRC) |
 | P_WDST | Target plant (P_WDST) |
-| P_LGDST | Receiving SLoc (P_LGDST) |
 | S_MATNR | Material (S_MATNR) |
 | S_CHARG | Batch (S_CHARG) |
 | S_MTART | Material type (S_MTART) |
@@ -146,7 +158,9 @@ leave *Dictionary Ref.* unticked, otherwise SAP replaces the text with the data 
 | P_FULL | Full validation (P_FULL) |
 | P_DIR | Direct transfer (P_DIR) |
 | P_TEST | Simulation (P_TEST) |
+| S_STAT | ALV status (S_STAT) |
 | P_DEL | Delete run ID (P_DEL) |
+| P_CLR | Delete all logs before the run (P_CLR) |
 
 Text symbols: `T01`=STOCKS & BATCHES MIGRATION PROGRAM (screen heading), `B01`=Organizational data,
 `B02`=Input file, `B03`=Run control, `B04`=Maintenance.
@@ -219,8 +233,10 @@ locations may map to the same receiving one. For each allocated issuing location
 
 Nothing is posted for a blocked line, even when only one of its storage locations fails. The
 checks run right after the allocation and before batch creation, so they also show up in a
-simulation run. `P_LGDST` is optional: when filled it is only checked against `T001L`, and it
-is not used for posting. Up to v0.5 the receiving location had the same code as the issuing one.
+simulation run. `P_LGDST` has been removed from the selection screen: the receiving location
+comes only from `ZPTP_SLOC_MAP`. Up to v0.5 the receiving location had the same code as the issuing one.
+A line rejected before the allocation (messages 002 to 005) is logged by `F_ADD_LOG_LOC`, one row
+per issuing storage location holding stock, with the mapped receiving location, so the ALV shows both.
 
 One `ZPTP_MOV_EXEC` row is written per item.
 
@@ -318,7 +334,7 @@ An input line whose Material+Batch has no unrestricted stock in the source plant
 as `ZPTP_SPLIT_VAL 006`, not as a quantity mismatch.
 
 The selection screen checks both plants against `T001W`, refuses source = target, checks
-`P_LGDST` against `T001L` when it is filled, requires a separator, and verifies that the input file is
+requires a separator, and verifies that the input file is
 readable before the run starts.
 
 ## Execution modes (sec.5)
@@ -353,6 +369,11 @@ with the BAPI message; the material document column shows `SIMULATED`. Batch cre
 simulated (the batch row in `ZPTP_BATCH_EXT` has status `T`). Uncheck to post.
 
 ## Maintenance — delete a RUN_ID (sec.5)
+`P_CLR` (`F_CLEAR_LOGS`) empties `ZPTP_MOV_EXEC` and `ZPTP_BATCH_EXT` before `F_INIT`, so the
+sequence restarts at 001. It checks `S_TABU_NAM` (activity 02) on both tables, asks for confirmation
+(skipped in background) and, unlike `P_DEL`, also removes the rows of runs that posted documents.
+It is refused together with `P_REPRC` and stops the run when not authorised or cancelled.
+
 `P_DEL` + a `RUN_ID` deletes that run's rows from `ZPTP_MOV_EXEC` and `ZPTP_BATCH_EXT` only
 (after a confirmation popup). No stock movement, no impact on SAP standard data. Requires
 `S_TABU_NAM` (activity 02, table `ZPTP_MOV_EXEC`) and is refused when the run holds posted
@@ -404,3 +425,29 @@ either a code change or a breach approval from the Integration and Development L
   still to be agreed with the security team.
 - **Online documentation (§4.5.2)** for the report in SE38, and message long texts (§4.10).
 - **`TYPE-POOLS`** is obsolete and can be removed once the code is checked in the system.
+
+## ALV status filter (S_STAT)
+`S_STAT` is a select-option on the status codes of the ALV (S, E, W, T, Z, X, I). Blank shows every
+row. `F_DISPLAY_ALV` deletes the rows that do not match before displaying, so the filter concerns
+the display only: the rows are already logged in `ZPTP_MOV_EXEC`. When nothing matches, a message
+is shown instead of the list. `F_F4_STATUS` provides the F4 help (value list with meanings in a
+`DD07V` table, because the help function reads dictionary field information; multiple choice: the
+first value goes in the field, the others are appended to `S_STAT`).
+
+## ALV order and columns
+`F_DISPLAY_ALV` sets `SORT_KEY` (hidden) from the position of the status in `TSEWZIX` (unknown = 9),
+sorts `GT_OUT` STABLE by it and passes `SORT_KEY` / `STATUS` as the ALV sort, so the rows are grouped
+by status with T and S first. All fields of `GTY_OUT` are displayed except `SORT_KEY`, including
+`MSGTY` and `NORMBAT`.
+
+## Utility report (ZPTP_SPLIT_VAL_MIG_UTILITY)
+Builds the CSV input file `MATNR;CHARG;BWTAR;QUANTITY;UOM` from SAP: unrestricted stock of plant 1
+(default 8P01, MCHB per batch, MARD for non-batch materials), valuation type of plant 2 (default
+8Q01, first MBEW type in ascending order). Test mode (default on) shows the ALV only; otherwise a
+save dialog downloads the file. Selection: plants, `S_MATNR`, `S_CHARG`, `P_ZERO` (include
+zero-quantity lines), `P_INCL` (ALV shows only the rows included in the file; the file itself is
+not affected), `P_TEST`. The ALV shows every row read with a status (S written, Z zero quantity,
+E left out with a message) and the column *New batch in P2*, ticked when the batch exists in
+plant 1 and has no `MCHA` record in plant 2. This column is for the ALV only and is not in the file.
+The UOM column of the file is written in the logon language (`CONVERSION_EXIT_CUNIT_OUTPUT`, for
+example PC instead of ST); the migration report converts it back on load.

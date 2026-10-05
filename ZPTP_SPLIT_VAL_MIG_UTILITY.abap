@@ -84,6 +84,12 @@ TYPES: BEGIN OF gty_vt,
        END OF gty_vt,
        gtt_vt TYPE SORTED TABLE OF gty_vt WITH UNIQUE KEY matnr bwtar.
 
+TYPES: BEGIN OF gty_batch,
+         matnr TYPE matnr,
+         charg TYPE charg_d,
+       END OF gty_batch,
+       gtt_batch TYPE SORTED TABLE OF gty_batch WITH UNIQUE KEY matnr charg.
+
 TYPES: BEGIN OF gty_stock,
          matnr TYPE matnr,
          charg TYPE charg_d,
@@ -101,6 +107,7 @@ TYPES: BEGIN OF gty_out,
          menge  TYPE p LENGTH 13 DECIMALS 3,
          meins  TYPE meins,
          infile TYPE abap_bool,
+         newbat TYPE abap_bool,
          msg    TYPE c LENGTH 100,
        END OF gty_out,
        gtt_out TYPE STANDARD TABLE OF gty_out WITH DEFAULT KEY.
@@ -111,6 +118,7 @@ TYPES: BEGIN OF gty_out,
 DATA: gt_mat1  TYPE gtt_mat,       " materials of plant 1
       gt_mat2  TYPE gtt_mat,       " materials of plant 2
       gt_vt2   TYPE gtt_vt,        " valuation-type segments of plant 2
+      gt_bat2  TYPE gtt_batch,     " batches existing in plant 2
       gt_stock TYPE gtt_stock,
       gt_out   TYPE gtt_out,
       gt_file  TYPE string_table.
@@ -131,6 +139,7 @@ SELECTION-SCREEN END OF BLOCK b1.
 
 SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE gv_tit2.
   PARAMETERS: p_zero TYPE abap_bool AS CHECKBOX,                " include zero-quantity lines
+              p_incl TYPE abap_bool AS CHECKBOX,                " ALV: only rows included in the file
               p_test TYPE abap_bool AS CHECKBOX DEFAULT 'X'.    " test: ALV only, no file
 SELECTION-SCREEN END OF BLOCK b2.
 
@@ -146,6 +155,7 @@ INITIALIZATION.
   %_s_matnr_%_app_%-text  = 'Material'.
   %_s_charg_%_app_%-text  = 'Batch'.
   %_p_zero_%_app_%-text   = 'Include zero-quantity lines'.
+  %_p_incl_%_app_%-text   = 'Records in file only'.
   %_p_test_%_app_%-text   = 'Test mode (ALV only, no file)'.
 
 AT SELECTION-SCREEN.
@@ -163,6 +173,15 @@ START-OF-SELECTION.
   IF p_test = abap_false.
     PERFORM f_build_file.
     PERFORM f_download_file.
+  ENDIF.
+* the file is built from the full table above; the filter only
+* concerns the display
+  IF p_incl = abap_true.
+    DELETE gt_out WHERE infile = abap_false.
+    IF gt_out IS INITIAL.
+      MESSAGE 'No row is included in the file' TYPE 'S' DISPLAY LIKE 'W'.
+      RETURN.
+    ENDIF.
   ENDIF.
   PERFORM f_display_alv.
 
@@ -222,6 +241,14 @@ FORM f_read_materials.
       AND matnr IN @s_matnr
       AND bwtar <> @space
     INTO CORRESPONDING FIELDS OF TABLE @gt_vt2.
+
+* batches already existing in plant 2 (to flag the missing ones in the ALV)
+  CLEAR gt_bat2.
+  SELECT matnr, charg FROM mcha
+    WHERE werks = @p_werks2
+      AND matnr IN @s_matnr
+      AND charg IN @s_charg
+    INTO CORRESPONDING FIELDS OF TABLE @gt_bat2.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
@@ -276,6 +303,15 @@ FORM f_build_output.
     ENDIF.
     SELECT SINGLE maktx FROM makt INTO @ls_out-maktx
       WHERE matnr = @ls_stk-matnr AND spras = @sy-langu.
+
+*   batch of plant 1 that does not exist yet in plant 2
+    IF ls_out-charg IS NOT INITIAL.
+      READ TABLE gt_bat2 TRANSPORTING NO FIELDS
+           WITH TABLE KEY matnr = ls_out-matnr charg = ls_out-charg.
+      IF sy-subrc <> 0.
+        ls_out-newbat = abap_true.
+      ENDIF.
+    ENDIF.
 
     PERFORM f_find_bwtar USING    ls_stk-matnr
                          CHANGING ls_out-bwtar ls_out-msg.
@@ -336,7 +372,17 @@ FORM f_build_file.
   LOOP AT gt_out INTO DATA(ls_out) WHERE infile = abap_true.
     DATA(lv_qty) = |{ ls_out-menge DECIMALS = 3 }|.
     CONDENSE lv_qty NO-GAPS.
-    DATA(lv_uom) = |{ ls_out-meins }|.
+*   unit in the logon language (internal ST -> external PC in English)
+    DATA lv_uom TYPE c LENGTH 3.
+    CALL FUNCTION 'CONVERSION_EXIT_CUNIT_OUTPUT'
+      EXPORTING  input          = ls_out-meins
+                 language       = sy-langu
+      IMPORTING  output         = lv_uom
+      EXCEPTIONS unit_not_found = 1
+                 OTHERS         = 2.
+    IF sy-subrc <> 0.
+      lv_uom = ls_out-meins.
+    ENDIF.
     APPEND |{ ls_out-matnr ALPHA = OUT }{ gc_sep }{ ls_out-charg }{ gc_sep }| &&
            |{ ls_out-bwtar }{ gc_sep }{ lv_qty }{ gc_sep }{ lv_uom }|
            TO gt_file.
@@ -424,6 +470,9 @@ FORM f_display_alv.
       lo_cols->get_column( 'MENGE'  )->set_medium_text( 'Quantity' ).
       lo_cols->get_column( 'INFILE' )->set_medium_text( 'In file' ).
       CAST cl_salv_column_table( lo_cols->get_column( 'INFILE' ) )->set_cell_type( if_salv_c_cell_type=>checkbox ).
+      lo_cols->get_column( 'NEWBAT' )->set_medium_text( 'New batch in P2' ).
+      lo_cols->get_column( 'NEWBAT' )->set_tooltip( 'Batch not yet in plant 2' ).
+      CAST cl_salv_column_table( lo_cols->get_column( 'NEWBAT' ) )->set_cell_type( if_salv_c_cell_type=>checkbox ).
       lo_cols->get_column( 'MSG'    )->set_medium_text( 'Message' ).
     CATCH cx_salv_not_found.
   ENDTRY.

@@ -274,6 +274,7 @@ TYPES: BEGIN OF gty_out,
          msgno      TYPE symsgno,
          message    TYPE bapi_msg,
          normbat    TYPE abap_bool,   " batch value normalised to blank
+         sort_key   TYPE c LENGTH 1,  " display order of the status, ALV only
        END OF gty_out.
 TYPES: gtt_out TYPE STANDARD TABLE OF gty_out WITH DEFAULT KEY.
 
@@ -442,7 +443,8 @@ DATA: gt_sloc_map TYPE SORTED TABLE OF gty_sloc_map WITH UNIQUE KEY lgort_src.
 * reference fields for SELECT-OPTIONS (FOR needs a field, not a table)
 DATA: gv_sel_matnr TYPE matnr,
       gv_sel_charg TYPE charg_d,
-      gv_sel_mtart TYPE mtart.
+      gv_sel_mtart TYPE mtart,
+      gv_sel_stat  TYPE c LENGTH 1.
 
 *&---------------------------------------------------------------------*
 *&  Selection screen
@@ -453,8 +455,7 @@ SELECTION-SCREEN BEGIN OF BLOCK b0 WITH FRAME TITLE TEXT-t01.
 
 SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-b01.
   PARAMETERS: p_wsrc TYPE werks_d OBLIGATORY DEFAULT '8P01',   " source plant
-              p_wdst TYPE werks_d OBLIGATORY DEFAULT '8Q01',    " target plant
-              p_lgdst TYPE lgort_d.        " optional, T001L check only; not posted [v0.4-26, v0.6]
+              p_wdst TYPE werks_d OBLIGATORY DEFAULT '8Q01'.    " target plant
   SELECT-OPTIONS: s_matnr FOR gv_sel_matnr,                     " optional filter
                   s_charg FOR gv_sel_charg,
                   s_mtart FOR gv_sel_mtart.                     " material type
@@ -475,10 +476,12 @@ SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE TEXT-b03.
   PARAMETERS: p_full  RADIOBUTTON GROUP mod DEFAULT 'X',         " Full Validation Mode
               p_dir   RADIOBUTTON GROUP mod.                     " Direct Transfer Mode
   PARAMETERS: p_test  TYPE abap_bool DEFAULT 'X' AS CHECKBOX.    " TESTRUN (simulation)
+  SELECT-OPTIONS: s_stat FOR gv_sel_stat.                        " ALV status filter, blank = all
 SELECTION-SCREEN END OF BLOCK b3.
 
 SELECTION-SCREEN BEGIN OF BLOCK b4 WITH FRAME TITLE TEXT-b04.
-  PARAMETERS: p_del TYPE abap_bool AS CHECKBOX.                  " delete RUN_ID (Z tables only)
+  PARAMETERS: p_del TYPE abap_bool AS CHECKBOX,                  " delete RUN_ID (Z tables only)
+              p_clr TYPE abap_bool AS CHECKBOX.                  " empty ALL log tables before the run
 SELECTION-SCREEN END OF BLOCK b4.
 
 SELECTION-SCREEN END OF BLOCK b0.
@@ -488,6 +491,15 @@ SELECTION-SCREEN END OF BLOCK b0.
 *&---------------------------------------------------------------------*
 AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_file.
   PERFORM f_f4_file.
+
+*&---------------------------------------------------------------------*
+*&  F4 help for the status filter: values with meaning, several can be
+*&  ticked
+*&---------------------------------------------------------------------*
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR s_stat-low.
+  PERFORM f_f4_status.
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR s_stat-high.
+  PERFORM f_f4_status.
 
 *&---------------------------------------------------------------------*
 *&  Screen consistency                                        [v0.2 - 2]
@@ -500,6 +512,8 @@ AT SELECTION-SCREEN.
 *&---------------------------------------------------------------------*
 START-OF-SELECTION.
 
+  DATA lv_clr_ok TYPE abap_bool.
+
 * Maintenance path: delete a RUN_ID from Z tables and stop.
   IF p_del = abap_true.
     PERFORM f_delete_run.
@@ -510,6 +524,14 @@ START-OF-SELECTION.
 * checks of AT SELECTION-SCREEN.                             [v0.3-23]
   IF p_budat IS INITIAL.
     MESSAGE 'Posting date is required' TYPE 'E'.
+  ENDIF.
+
+* Option: empty all the log tables before the run
+  IF p_clr = abap_true.
+    PERFORM f_clear_logs CHANGING lv_clr_ok.
+    IF lv_clr_ok = abap_false.
+      RETURN.
+    ENDIF.
   ENDIF.
 
   PERFORM f_init.
@@ -553,6 +575,64 @@ START-OF-SELECTION.
 
 END-OF-SELECTION.
   PERFORM f_display_alv.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_F4_STATUS
+*&      Value list of the status codes. The first value ticked goes in
+*&      the field, the other ones are added to the selection table.
+*&---------------------------------------------------------------------*
+FORM f_f4_status.
+* DDIC-typed value table (DD07V): the help function reads the field
+* descriptions from the dictionary
+  DATA: lt_val   TYPE STANDARD TABLE OF dd07v WITH DEFAULT KEY,
+        lt_ret   TYPE STANDARD TABLE OF ddshretval,
+        lt_dynp  TYPE STANDARD TABLE OF dynpread,
+        ls_dynp  TYPE dynpread,
+        lv_first TYPE abap_bool VALUE abap_true.
+
+  lt_val = VALUE #( ( domvalue_l = gc_st_ok     ddtext = 'Success - posted' )
+                    ( domvalue_l = gc_st_err    ddtext = 'Error - blocked or excluded' )
+                    ( domvalue_l = gc_st_warn   ddtext = 'Warning' )
+                    ( domvalue_l = gc_st_test   ddtext = 'Simulation OK - not posted' )
+                    ( domvalue_l = gc_st_zero   ddtext = 'Zero quantity - no movement' )
+                    ( domvalue_l = gc_st_skip   ddtext = 'Skipped (reconciliation)' )
+                    ( domvalue_l = gc_st_incons ddtext = 'Inconsistent (SAP stock not in file)' ) ).
+
+  CALL FUNCTION 'F4IF_INT_TABLE_VALUE_REQUEST'
+    EXPORTING  retfield        = 'DOMVALUE_L'
+               window_title    = 'Status'
+               value_org       = 'S'
+               multiple_choice = abap_true
+    TABLES     value_tab       = lt_val
+               return_tab      = lt_ret
+    EXCEPTIONS parameter_error = 1
+               no_values_found = 2
+               OTHERS          = 3.
+  IF sy-subrc <> 0.
+    MESSAGE |Status value help could not be displayed (return code { sy-subrc })|
+            TYPE 'S' DISPLAY LIKE 'E'.
+    RETURN.
+  ENDIF.
+  IF lt_ret IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  LOOP AT lt_ret INTO DATA(ls_ret).
+    IF lv_first = abap_true.
+      lv_first = abap_false.
+      ls_dynp-fieldname  = 'S_STAT-LOW'.
+      ls_dynp-fieldvalue = ls_ret-fieldval.
+      APPEND ls_dynp TO lt_dynp.
+      CALL FUNCTION 'DYNP_VALUES_UPDATE'
+        EXPORTING  dyname     = sy-repid
+                   dynumb     = sy-dynnr
+        TABLES     dynpfields = lt_dynp
+        EXCEPTIONS OTHERS     = 1.
+    ELSE.
+      APPEND VALUE #( sign = 'I' option = 'EQ' low = ls_ret-fieldval ) TO s_stat.
+    ENDIF.
+  ENDLOOP.
+ENDFORM.
 
 *&---------------------------------------------------------------------*
 *&      Form  F_F4_FILE                                         [v0.5-30]
@@ -621,6 +701,11 @@ FORM f_check_screen.
     RETURN.
   ENDIF.
 
+* --- emptying the logs removes the history a reprocessing relies on
+  IF p_clr = abap_true AND p_reprc = abap_true.
+    MESSAGE 'Delete all logs cannot be combined with Reprocess errors' TYPE 'E'.
+  ENDIF.
+
 * --- plants -----------------------------------------------------------
   SELECT SINGLE werks FROM t001w INTO @DATA(lv_w)
     WHERE werks = @p_wsrc.
@@ -642,16 +727,6 @@ FORM f_check_screen.
 *     neither)                                                [v0.3-23]
   IF p_budat IS INITIAL.
     MESSAGE 'Posting date is required' TYPE 'E'.
-  ENDIF.
-
-* --- receiving storage location: optional, not used for posting since
-*     each item's receiving location comes from ZPTP_SLOC_MAP [v0.4-26, v0.6]
-  IF p_lgdst IS NOT INITIAL.
-    SELECT SINGLE lgort FROM t001l INTO @DATA(lv_l)
-      WHERE werks = @p_wdst AND lgort = @p_lgdst.
-    IF sy-subrc <> 0.
-      MESSAGE |Storage location { p_lgdst } does not exist in plant { p_wdst } (T001L)| TYPE 'E'.
-    ENDIF.
   ENDIF.
 
 * --- storage-location mapping for the plant pair             [v0.6-41]
@@ -749,6 +824,65 @@ FORM f_init.
     WRITE: / '*** SIMULATION (TESTRUN) - no posting ***' COLOR COL_TOTAL.
   ENDIF.
   SKIP.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_CLEAR_LOGS   (option P_CLR)
+*&      Empties both log tables before the run. Needs the table
+*&      authorization on both tables and a confirmation in dialog.
+*&      The rows of runs that posted documents are removed as well.
+*&---------------------------------------------------------------------*
+FORM f_clear_logs CHANGING cv_ok TYPE abap_bool.
+
+  DATA lv_answer TYPE c.
+
+  cv_ok = abap_false.
+
+  AUTHORITY-CHECK OBJECT 'S_TABU_NAM'
+    ID 'ACTVT' FIELD '02'
+    ID 'TABLE' FIELD 'ZPTP_MOV_EXEC'.
+  IF sy-subrc <> 0.
+    MESSAGE 'No authorization to empty the log (S_TABU_NAM, ZPTP_MOV_EXEC)'
+            TYPE 'S' DISPLAY LIKE 'E'.
+    RETURN.
+  ENDIF.
+  AUTHORITY-CHECK OBJECT 'S_TABU_NAM'
+    ID 'ACTVT' FIELD '02'
+    ID 'TABLE' FIELD 'ZPTP_BATCH_EXT'.
+  IF sy-subrc <> 0.
+    MESSAGE 'No authorization to empty the log (S_TABU_NAM, ZPTP_BATCH_EXT)'
+            TYPE 'S' DISPLAY LIKE 'E'.
+    RETURN.
+  ENDIF.
+
+* a background job cannot answer a popup: the option itself is the
+* confirmation there
+  IF sy-batch = abap_false.
+    CALL FUNCTION 'POPUP_TO_CONFIRM'
+      EXPORTING
+        titlebar      = 'Empty the log tables'
+        text_question = 'All rows of ZPTP_MOV_EXEC and ZPTP_BATCH_EXT will be deleted, '
+                     && 'including the log of runs that posted documents. Continue?'
+        text_button_1 = 'Delete all'
+        text_button_2 = 'Cancel'
+        default_button = '2'
+      IMPORTING
+        answer        = lv_answer.
+    IF lv_answer <> '1'.
+      MESSAGE 'Run cancelled: the log tables were not emptied' TYPE 'S' DISPLAY LIKE 'W'.
+      RETURN.
+    ENDIF.
+  ENDIF.
+
+  DELETE FROM zptp_mov_exec.
+  DATA(lv_mov) = sy-dbcnt.
+  DELETE FROM zptp_batch_ext.
+  DATA(lv_ext) = sy-dbcnt.
+  COMMIT WORK.
+
+  MESSAGE |Log emptied: { lv_mov } ZPTP_MOV_EXEC rows, { lv_ext } ZPTP_BATCH_EXT rows deleted|
+          TYPE 'S'.
+  cv_ok = abap_true.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
@@ -1708,7 +1842,8 @@ FORM f_process_lines.
     IF ls_raw-menge = 0.
       ls_out-status  = gc_st_zero.
       ls_out-message = 'Zero quantity in input file - no movement created'.
-      PERFORM f_add_log USING gc_msgid '002' 'W' CHANGING ls_out.
+      PERFORM f_add_log_loc USING gc_msgid '002' 'W' ls_raw-matnr ls_raw-charg
+                            CHANGING ls_out.
       CONTINUE.
     ENDIF.
 
@@ -1732,7 +1867,8 @@ FORM f_process_lines.
                                        iv_bwtar = ls_raw-bwtar ) = abap_false.
         ls_out-status  = gc_st_err.
         ls_out-message = |Valuation type { ls_raw-bwtar } not created in target plant { p_wdst }|.
-        PERFORM f_add_log USING gc_msgid '003' 'E' CHANGING ls_out.
+        PERFORM f_add_log_loc USING gc_msgid '003' 'E' ls_raw-matnr ls_raw-charg
+                              CHANGING ls_out.
         CONTINUE.
       ENDIF.
 
@@ -1743,7 +1879,8 @@ FORM f_process_lines.
       IF ls_out-variance <> 0.
         ls_out-status  = gc_st_err.
         ls_out-message = |Quantity mismatch: file { ls_sum-menge } vs SAP { ls_out-qty_sap } (var { ls_out-variance })|.
-        PERFORM f_add_log USING gc_msgid '004' 'E' CHANGING ls_out.
+        PERFORM f_add_log_loc USING gc_msgid '004' 'E' ls_raw-matnr ls_raw-charg
+                              CHANGING ls_out.
         CONTINUE.
       ENDIF.
     ENDIF.
@@ -1766,7 +1903,8 @@ FORM f_process_lines.
       ls_out-status  = gc_st_err.
       ls_out-message = |Cannot allocate { ls_raw-menge } { ls_raw-meins } to storage | &&
                        |locations of plant { p_wsrc }: { lv_avail } still available|.
-      PERFORM f_add_log USING gc_msgid '005' 'E' CHANGING ls_out.
+      PERFORM f_add_log_loc USING gc_msgid '005' 'E' ls_raw-matnr ls_raw-charg
+                            CHANGING ls_out.
       CONTINUE.
     ENDIF.
 
@@ -1833,7 +1971,14 @@ FORM f_process_lines.
       IF ls_done-ok = abap_false.
         ls_out-status  = gc_st_err.
         ls_out-message = |Batch extension failed - transfer skipped. { ls_done-msg }|.
-        PERFORM f_add_log USING ls_done-id ls_done-no ls_done-ty CHANGING ls_out.
+*       one log row per issuing / receiving storage location, as for a
+*       posting, so that the ALV shows the target location
+        LOOP AT lt_alloc INTO ls_alloc.
+          ls_out-lgort_src  = ls_alloc-lgort.
+          ls_out-lgort_dst  = ls_alloc-lgort_dst.
+          ls_out-menge_post = ls_alloc-menge.
+          PERFORM f_add_log USING ls_done-id ls_done-no ls_done-ty CHANGING ls_out.
+        ENDLOOP.
 *       the allocated stock is available again for another line [v0.4-27]
         PERFORM f_consume_alloc USING lt_alloc ls_raw-matnr ls_raw-charg gc_back.
         CONTINUE.
@@ -1924,6 +2069,9 @@ FORM f_extend_batch USING iv_matnr TYPE matnr
         lt_ret  TYPE STANDARD TABLE OF bapiret2,
         ls_ret  TYPE bapiret2,
         lv_newb TYPE charg_d,
+*       the material parameter of the batch BAPIs is typed
+*       BAPIBATCHKEY-MATERIAL, not MATNR
+        lv_bmat TYPE bapibatchkey-material,
         lv_noid TYPE symsgid,          " empty message id/no for the log
         lv_nono TYPE symsgno.
 
@@ -1951,9 +2099,11 @@ FORM f_extend_batch USING iv_matnr TYPE matnr
     RETURN.
   ENDIF.
 
+  lv_bmat = iv_matnr.
+
 * attributes of the source batch                          [v0.3-17]
   CALL FUNCTION 'BAPI_BATCH_GET_DETAIL'
-    EXPORTING material        = iv_matnr
+    EXPORTING material        = lv_bmat
               batch           = iv_charg
               plant           = p_wsrc
     IMPORTING batchattributes = ls_att
@@ -1981,7 +2131,7 @@ FORM f_extend_batch USING iv_matnr TYPE matnr
 
   CLEAR lt_ret.
   CALL FUNCTION 'BAPI_BATCH_CREATE'
-    EXPORTING material        = iv_matnr
+    EXPORTING material        = lv_bmat
               batch           = iv_charg
               plant           = p_wdst
               batchattributes = ls_att
@@ -2013,7 +2163,7 @@ ENDFORM.
 *&      storage location. STGE_LOC = issuing location from the
 *&      allocation.                                          [v0.2 - 1]
 *&      MOVE_STLOC = the receiving storage location mapped in
-*&      ZPTP_SLOC_MAP (same code up to v0.5, P_LGDST up to v0.3).
+*&      ZPTP_SLOC_MAP (same code up to v0.5).
 *&                                                           [v0.6-41]
 *&      The target valuation type goes in MOVE_VAL_TYPE (receiving
 *&      side); VAL_TYPE (issuing side) stays blank.          [v0.3-15]
@@ -2107,6 +2257,41 @@ FORM f_post_301 USING is_raw   TYPE gty_input_raw
 ENDFORM.
 
 *&---------------------------------------------------------------------*
+*&      Form  F_ADD_LOG_LOC
+*&      Log of a line rejected before the allocation: one row per
+*&      storage location currently holding unrestricted stock of the
+*&      material / batch, with the receiving location read from
+*&      ZPTP_SLOC_MAP (blank when the location is not mapped). A single
+*&      row without locations when the material / batch has no stock.
+*&---------------------------------------------------------------------*
+FORM f_add_log_loc USING iv_id    TYPE symsgid
+                         iv_no    TYPE symsgno
+                         iv_ty    TYPE symsgty
+                         iv_matnr TYPE matnr
+                         iv_charg TYPE charg_d
+                   CHANGING cs_out TYPE gty_out.
+
+  DATA lv_any TYPE abap_bool.
+
+  LOOP AT gt_stock_loc INTO DATA(ls_loc)
+       WHERE matnr = iv_matnr AND charg = iv_charg AND menge > 0.
+    lv_any = abap_true.
+    cs_out-lgort_src = ls_loc-lgort.
+    CLEAR cs_out-lgort_dst.
+    READ TABLE gt_sloc_map INTO DATA(ls_map)
+         WITH TABLE KEY lgort_src = ls_loc-lgort.
+    IF sy-subrc = 0.
+      cs_out-lgort_dst = ls_map-lgort_dst.
+    ENDIF.
+    PERFORM f_add_log USING iv_id iv_no iv_ty CHANGING cs_out.
+  ENDLOOP.
+
+  IF lv_any = abap_false.
+    PERFORM f_add_log USING iv_id iv_no iv_ty CHANGING cs_out.
+  ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
 *&      Form  F_ADD_LOG   (buffer one ZPTP_MOV_EXEC row + ALV row)
 *&      Stamps the run context on the output row, so the ALV mirrors
 *&      ZPTP_MOV_EXEC.                                        [v0.2 - 9]
@@ -2133,7 +2318,7 @@ FORM f_add_log USING iv_id  TYPE symsgid
   cs_out-werks_src = p_wsrc.
   cs_out-werks_dst = p_wdst.
 * LGORT_DST = actual receiving location, blank when nothing was
-* allocated (P_LGDST is not used for posting)                [v0.4-26]
+* allocated
   cs_out-msgty     = iv_ty.
   cs_out-msgid     = iv_id.
   cs_out-msgno     = iv_no.
@@ -2268,7 +2453,26 @@ ENDFORM.
 FORM f_display_alv.
   DATA: lt_fcat TYPE slis_t_fieldcat_alv,
         ls_fcat TYPE slis_fieldcat_alv,
+        lt_sort TYPE slis_t_sortinfo_alv,
         ls_lay  TYPE slis_layout_alv.
+
+* status filter of the selection screen (blank = all values); it only
+* concerns the display, the log has already been written
+  DELETE gt_out WHERE status NOT IN s_stat.
+  IF gt_out IS INITIAL.
+    MESSAGE 'No row matches the selected status values' TYPE 'S'
+            DISPLAY LIKE 'W'.
+    RETURN.
+  ENDIF.
+* grouped by status: simulation (T) and success (S) first, then the
+* other statuses; the original order is kept inside a status
+  CONSTANTS lc_order TYPE string VALUE 'TSEWZIX'.
+  LOOP AT gt_out ASSIGNING FIELD-SYMBOL(<ls_out>).
+    DATA(lv_pos) = find( val = lc_order sub = <ls_out>-status ).
+    <ls_out>-sort_key = COND #( WHEN lv_pos >= 0 THEN lv_pos ELSE 9 ).
+  ENDLOOP.
+  SORT gt_out STABLE BY sort_key.
+
   DEFINE add_col.
     CLEAR ls_fcat.
     ls_fcat-fieldname = &1. ls_fcat-seltext_l = &2.
@@ -2291,6 +2495,7 @@ FORM f_display_alv.
   add_col 'VARIANCE'   'Variance'.
   add_col 'MBLNR'      'Mat.Doc'.
   add_col 'MJAHR'      'Year'.
+  add_col 'MSGTY'      'Msg Type'.
   add_col 'MSGID'      'Msg Class'.
   add_col 'MSGNO'      'Msg No'.
   add_col 'MESSAGE'    'Message'.
@@ -2298,12 +2503,20 @@ FORM f_display_alv.
   add_col 'RUN_SEQ'    'Seq'.
   add_col 'RUN_MODE'   'Mode'.
   add_col 'TESTRUN'    'Simulation'.
+  add_col 'NORMBAT'    'Batch normalised'.
+* technical sort key, not displayed
+  add_col 'SORT_KEY'   'Sort'.
+  ls_fcat-no_out = abap_true.
+  MODIFY lt_fcat FROM ls_fcat INDEX lines( lt_fcat ).
+  lt_sort = VALUE #( ( spos = 1 fieldname = 'SORT_KEY' up = abap_true )
+                     ( spos = 2 fieldname = 'STATUS'   up = abap_true ) ).
   ls_lay-colwidth_optimize = abap_true.
   ls_lay-zebra = abap_true.
   CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
     EXPORTING i_callback_program = sy-repid
               is_layout   = ls_lay
               it_fieldcat = lt_fcat
+              it_sort     = lt_sort
     TABLES    t_outtab    = gt_out
     EXCEPTIONS program_error = 1 OTHERS = 2.
 ENDFORM.
