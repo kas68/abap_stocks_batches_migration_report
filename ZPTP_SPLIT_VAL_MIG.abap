@@ -3,7 +3,7 @@
 *&---------------------------------------------------------------------*
 *& Project : HBM - Split Valuation migration
 *& Scope   : Clearing of batch stocks / Inter-plant transfer
-*& Version : v0.6
+*& Version : v0.8
 *& Package : ZPTP_SPLIT_VAL        Message class: ZPTP_SPLIT_VAL
 *&
 *&---------------------------------------------------------------------*
@@ -40,6 +40,27 @@
 *&       before batch creation.
 *&   4.  Log every record in ZPTP_MOV_EXEC (one row per line and
 *&       issuing storage location).
+*&
+*& Processing option (v0.7) - selection screen block B5:
+*&   - 1 Split Valuation Materials (P_SPLIT, default): behaviour above,
+*&     driven by the input file.
+*&   - 2 Non split valuation materials (P_NONSPL): the input file is read
+*&     only to know which materials it carries. Every material with
+*&     unrestricted stock in the source plant that is NOT in the file is
+*&     transferred with its whole unrestricted stock: batch created in
+*&     the target plant (batch-managed only), then 301. The material must
+*&     not be split-valuated in the target plant (ZPTP_SPLIT_VAL 025) and
+*&     no valuation type is read or posted. Test run, RUN_ID / restart
+*&     and logging work as for option 1; P_FULL / P_DIR are ignored
+*&     (the checks of option 2 always run).
+*&
+*& Zero-stock batches (v0.8) - P_ZBAT, both options: the batch is created
+*&   in the target plant (if missing) although the unrestricted stock in
+*&   the source plant is 0; no movement is posted.
+*&   Option 1: file lines with quantity 0 and a batch (valuation type of
+*&   the line, 3.3 check in Full mode). Option 2: batches of the source
+*&   plant (MCHA, not flagged for deletion) with no unrestricted stock, for
+*&   materials not in the file. Without P_ZBAT a zero line stays status Z.
 *&
 *& Execution strategies (sec.5):
 *&   - Full Validation Mode  : runs all checks 3.2 - 3.5 (default).
@@ -418,6 +439,7 @@ DATA: gt_input_raw TYPE gtt_input_raw,
       gt_marc      TYPE gtt_marc,
       gt_badmat    TYPE gtt_matnr,
       gt_badkey    TYPE gtt_badkey,
+      gt_file_matnr TYPE gtt_matnr,             " materials carried by the file [v0.7]
       gt_stock     TYPE gtt_stock,
       gt_stock_loc TYPE gtt_stock_loc,
       gt_errkey    TYPE gtt_errkey,
@@ -449,9 +471,12 @@ DATA: gv_sel_matnr TYPE matnr,
 *&---------------------------------------------------------------------*
 *&  Selection screen
 *&---------------------------------------------------------------------*
-* screen heading: outer frame whose title T01 is displayed in bold
-* (T01 = STOCKS & BATCHES MIGRATION PROGRAM); blocks B1-B4 sit inside it
-SELECTION-SCREEN BEGIN OF BLOCK b0 WITH FRAME TITLE TEXT-t01.
+* processing option                                          [v0.7]
+SELECTION-SCREEN BEGIN OF BLOCK b5 WITH FRAME TITLE TEXT-b05.
+  PARAMETERS: p_split  RADIOBUTTON GROUP opt DEFAULT 'X',        " 1 Split Valuation Materials
+              p_nonspl RADIOBUTTON GROUP opt.                    " 2 Non split valuation materials
+  PARAMETERS: p_zbat   TYPE abap_bool AS CHECKBOX.               " create batches with zero stock [v0.8]
+SELECTION-SCREEN END OF BLOCK b5.
 
 SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-b01.
   PARAMETERS: p_wsrc TYPE werks_d OBLIGATORY DEFAULT '8P01',   " source plant
@@ -483,8 +508,6 @@ SELECTION-SCREEN BEGIN OF BLOCK b4 WITH FRAME TITLE TEXT-b04.
   PARAMETERS: p_del TYPE abap_bool AS CHECKBOX,                  " delete RUN_ID (Z tables only)
               p_clr TYPE abap_bool AS CHECKBOX.                  " empty ALL log tables before the run
 SELECTION-SCREEN END OF BLOCK b4.
-
-SELECTION-SCREEN END OF BLOCK b0.
 
 *&---------------------------------------------------------------------*
 *&  F4 help for the input file path (local and application server)
@@ -536,6 +559,13 @@ START-OF-SELECTION.
 
   PERFORM f_init.
 
+* Option 2: materials NOT in the file, no split valuation   [v0.7]
+  IF p_nonspl = abap_true.
+    PERFORM f_prepare_nonsplit.
+    PERFORM f_process_lines.
+    PERFORM f_save_logs.
+  ELSE.
+
 * 3.1 - read stock and input file
   PERFORM f_read_input CHANGING gt_input_raw.
   IF gt_input_raw IS INITIAL.
@@ -572,6 +602,8 @@ START-OF-SELECTION.
 
 * 4. - persist
   PERFORM f_save_logs.
+
+  ENDIF.
 
 END-OF-SELECTION.
   PERFORM f_display_alv.
@@ -794,8 +826,9 @@ FORM f_init.
     WHERE werks_src = @p_wsrc
       AND werks_dst = @p_wdst.
 
-  gv_run_mode = COND #( WHEN p_dir = abap_true THEN gc_mode_dir
-                                               ELSE gc_mode_full ).
+* Option 2 always runs its own checks: P_DIR is ignored   [v0.7]
+  gv_run_mode = COND #( WHEN p_dir = abap_true AND p_split = abap_true
+                        THEN gc_mode_dir ELSE gc_mode_full ).
 
 * RUN_ID: use given one or generate a new base id.
   IF p_runid IS INITIAL.
@@ -818,6 +851,9 @@ FORM f_init.
   WRITE: / 'RUN_ID:', gv_run_id, 'Seq:', gv_run_seq,
            'Mode:', COND string( WHEN gv_run_mode = gc_mode_dir
                                  THEN 'DIRECT' ELSE 'FULL' ).
+  WRITE: / 'Option:', COND string( WHEN p_nonspl = abap_true
+                                   THEN '2 - Non split valuation materials'
+                                   ELSE '1 - Split Valuation Materials' ).
   WRITE: / 'Transfer:', p_wsrc, '->', p_wdst, '(storage locations mapped by ZPTP_SLOC_MAP)',
            'Posting date:', p_budat.
   IF p_test = abap_true.
@@ -1007,7 +1043,8 @@ FORM f_parse_lines USING it_lines TYPE stringtab
         lv_qty_c TYPE string,
         lv_idx   TYPE i,
         lv_num   TYPE abap_bool,
-        lv_uom_ext TYPE meins.
+        lv_uom_ext TYPE meins,
+        lv_fmat    TYPE matnr.
 
   LOOP AT it_lines INTO lv_line.
 
@@ -1044,6 +1081,21 @@ FORM f_parse_lines USING it_lines TYPE stringtab
 *   --- quantity format ------------------------------------------------
     lv_num = COND #( WHEN lv_qty_c CO ' 0123456789.,-' AND lv_qty_c CA '0123456789'
                      THEN abap_true ELSE abap_false ).
+
+*   --- option 2: every material carried by the file is excluded, even
+*   when its line is rejected below or filtered out by S_CHARG. The
+*   header line is not a material.                              [v0.7]
+    IF p_nonspl = abap_true AND NOT ( lv_idx = 1 AND lv_num = abap_false ).
+      lv_fmat = ls_raw-matnr.
+      CALL FUNCTION 'CONVERSION_EXIT_MATN1_INPUT'
+        EXPORTING  input        = lv_fmat
+        IMPORTING  output       = lv_fmat
+        EXCEPTIONS length_error = 1
+                   OTHERS       = 2.
+      IF sy-subrc = 0 AND lv_fmat IS NOT INITIAL.
+        INSERT lv_fmat INTO TABLE gt_file_matnr.
+      ENDIF.
+    ENDIF.
 
     IF lv_num = abap_false.
       IF lv_idx = 1.
@@ -1776,6 +1828,135 @@ FORM f_check_sap_not_in_file.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
+*&      Form  F_PREPARE_NONSPLIT                                [v0.7]
+*&      Option 2 - non split valuation materials. The input file is read
+*&      only to learn which materials it carries (GT_FILE_MATNR). Every
+*&      other material with unrestricted stock in the source plant gets
+*&      one line in GT_INPUT_RAW carrying its whole stock per Material +
+*&      Batch, with no valuation type: F_PROCESS_LINES then allocates the
+*&      storage locations, creates the missing batch and posts the 301
+*&      exactly as for option 1. A line failing a check of this option is
+*&      flagged BAD and logged by F_PROCESS_LINES.
+*&      Checks: the material is extended to the target plant, batch
+*&      management is the same in both plants, and the material is NOT
+*&      split-valuated in the target plant (no valuation type is needed).
+*&---------------------------------------------------------------------*
+FORM f_prepare_nonsplit.
+
+  DATA: ls_stk  TYPE gty_stock,
+        ls_raw  TYPE gty_input_raw,
+        ls_src  TYPE gty_marc,
+        ls_dst  TYPE gty_marc,
+        lt_prev TYPE gtt_badkey,
+        lv_prev TYPE numc3.
+
+  PERFORM f_read_input CHANGING gt_input_raw.
+  IF gt_file_matnr IS INITIAL.
+*   an empty file would send every material of the plant
+    PERFORM f_save_logs.                     " keep the rejected lines
+    MESSAGE 'No usable line in the input file - see the log for rejected lines' TYPE 'E'.
+  ENDIF.
+  CLEAR gt_input_raw.                        " the file lines do not drive option 2
+
+  PERFORM f_read_marc.
+  PERFORM f_read_sap_stock.
+
+* restart of error lines only: keep the Material + Batch in error in the
+* previous sequence
+  IF p_reprc = abap_true.
+    lv_prev = gv_run_seq - 1.
+    IF lv_prev >= 1.
+      SELECT DISTINCT matnr, charg INTO TABLE @lt_prev
+        FROM zptp_mov_exec
+        WHERE run_id  = @gv_run_id
+          AND run_seq = @lv_prev
+          AND status  = @gc_st_err.
+    ENDIF.
+    IF lt_prev IS INITIAL.
+      MESSAGE 'No error lines to reprocess for this RUN_ID' TYPE 'I'.
+      RETURN.
+    ENDIF.
+  ENDIF.
+
+* candidates: batches with unrestricted stock, plus (P_ZBAT) the batches
+* of the source plant without unrestricted stock          [v0.8]
+  DATA lt_cand TYPE gtt_stock.
+  lt_cand = gt_stock.
+  IF p_zbat = abap_true.
+    SELECT matnr, charg FROM mcha INTO TABLE @DATA(lt_mcha)
+      WHERE werks =  @p_wsrc
+        AND matnr IN @s_matnr
+        AND charg IN @s_charg
+        AND lvorm =  @space.
+    LOOP AT lt_mcha INTO DATA(ls_mcha).
+      READ TABLE gt_marc INTO ls_src
+           WITH TABLE KEY matnr = ls_mcha-matnr werks = p_wsrc.
+      CHECK sy-subrc = 0 AND ls_src-batchmgd = abap_true AND ls_src-mtart IN s_mtart.
+      CLEAR ls_stk.
+      ls_stk-matnr = ls_mcha-matnr.
+      ls_stk-charg = ls_mcha-charg.
+      ls_stk-werks = p_wsrc.
+      ls_stk-xchpf = gc_xchpf.
+      ls_stk-meins = ls_src-meins.
+      INSERT ls_stk INTO TABLE lt_cand.      " duplicate (stock exists): ignored
+    ENDLOOP.
+  ENDIF.
+
+  LOOP AT lt_cand INTO ls_stk.
+
+*   materials of the file belong to option 1
+    READ TABLE gt_file_matnr TRANSPORTING NO FIELDS
+         WITH TABLE KEY table_line = ls_stk-matnr.
+    IF sy-subrc = 0.
+      CONTINUE.
+    ENDIF.
+
+    IF p_reprc = abap_true.
+      READ TABLE lt_prev TRANSPORTING NO FIELDS
+           WITH TABLE KEY matnr = ls_stk-matnr charg = ls_stk-charg.
+      IF sy-subrc <> 0.
+        CONTINUE.
+      ENDIF.
+    ENDIF.
+
+    CLEAR ls_raw.
+    ls_raw-matnr = ls_stk-matnr.
+    ls_raw-charg = ls_stk-charg.
+    ls_raw-menge = ls_stk-menge.              " whole unrestricted stock (0 for P_ZBAT batches)
+    ls_raw-meins = ls_stk-meins.              " base unit
+
+    READ TABLE gt_marc INTO ls_src
+         WITH TABLE KEY matnr = ls_stk-matnr werks = p_wsrc.
+    READ TABLE gt_marc INTO ls_dst
+         WITH TABLE KEY matnr = ls_stk-matnr werks = p_wdst.
+    IF sy-subrc <> 0.
+      ls_raw-bad   = abap_true.
+      ls_raw-badno = '014'.
+      ls_raw-badtx = |Material { ls_stk-matnr } is not extended to plant { p_wdst }|.
+    ELSEIF ls_src-batchmgd <> ls_dst-batchmgd.
+      ls_raw-bad   = abap_true.
+      ls_raw-badno = '026'.
+      ls_raw-badtx = |Material { ls_stk-matnr }: batch management differs between plant | &&
+                     |{ p_wsrc } ({ ls_src-batchmgd }) and plant { p_wdst } ({ ls_dst-batchmgd })|.
+    ELSEIF lcl_help=>is_split_valuated( iv_matnr = ls_stk-matnr
+                                        iv_bwkey = p_wdst ) = abap_true
+        OR lcl_help=>is_segment_created( iv_matnr = ls_stk-matnr
+                                         iv_bwkey = p_wdst ) = abap_true.
+      ls_raw-bad   = abap_true.
+      ls_raw-badno = '025'.
+      ls_raw-badtx = |Material { ls_stk-matnr } is managed with split valuation in plant | &&
+                     |{ p_wdst } - not eligible for the non split valuation option|.
+    ENDIF.
+
+    APPEND ls_raw TO gt_input_raw.
+  ENDLOOP.
+
+  IF gt_input_raw IS INITIAL.
+    MESSAGE 'No material to process: every material with stock is in the input file' TYPE 'I'.
+  ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
 *&      Form  F_PROCESS_LINES   (3.2 - 3.6 per input line)
 *&---------------------------------------------------------------------*
 FORM f_process_lines.
@@ -1801,7 +1982,8 @@ FORM f_process_lines.
         lv_cerr  TYPE abap_bool,
         lv_cmsg  TYPE bapi_msg,
         lv_lgmis TYPE lgort_d,                          " [v0.4-27]
-        lv_nomap TYPE lgort_d.                          " [v0.6-41]
+        lv_nomap TYPE lgort_d,                          " [v0.6-41]
+        lv_zdone TYPE abap_bool.                        " [v0.8]
 
 * memorised batch-extension result per MATNR + CHARG          [v0.2 - 6]
   DATA: lt_done TYPE gtt_done,
@@ -1813,7 +1995,7 @@ FORM f_process_lines.
   LOOP AT gt_input_raw INTO ls_raw.
 
     CLEAR: ls_out, lt_alloc, lv_mblnr, lv_mjahr, lv_msg, lv_id, lv_no, lv_ty,
-           lv_avail, lv_aok, lv_found, lv_split, lv_vt, lv_cerr, lv_cmsg.
+           lv_avail, lv_aok, lv_found, lv_split, lv_vt, lv_cerr, lv_cmsg, lv_zdone.
     ls_out-matnr     = ls_raw-matnr.
     ls_out-charg     = ls_raw-charg.
     ls_out-bwtar     = ls_raw-bwtar.
@@ -1840,6 +2022,14 @@ FORM f_process_lines.
 
 *   --- Zero-quantity rule (3.5): no movement ------------------------
     IF ls_raw-menge = 0.
+*     P_ZBAT: create the batch in the target plant, no movement [v0.8]
+      IF p_zbat = abap_true.
+        PERFORM f_zero_batch USING ls_raw lv_full
+                             CHANGING ls_out lt_done lv_zdone.
+        IF lv_zdone = abap_true.
+          CONTINUE.
+        ENDIF.
+      ENDIF.
       ls_out-status  = gc_st_zero.
       ls_out-message = 'Zero quantity in input file - no movement created'.
       PERFORM f_add_log_loc USING gc_msgid '002' 'W' ls_raw-matnr ls_raw-charg
@@ -1859,7 +2049,7 @@ FORM f_process_lines.
     ENDIF.
 
 *   ===== Full Validation Mode checks (bypassed in Direct mode) =====
-    IF lv_full = abap_true.
+    IF lv_full = abap_true AND p_split = abap_true.
 
 *     3.3 valuation-type segment must exist in target plant
       IF lcl_help=>is_segment_created( iv_matnr = ls_raw-matnr
@@ -2044,6 +2234,82 @@ FORM f_process_lines.
       PERFORM f_consume_alloc USING lt_alloc ls_raw-matnr ls_raw-charg gc_back.
     ENDIF.
   ENDLOOP.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_ZERO_BATCH                                      [v0.8]
+*&      P_ZBAT: batch of a zero-quantity line created in the target
+*&      plant, no movement. Only for a batch-managed material with a
+*&      batch; otherwise CV_DONE stays false and the line is handled as a
+*&      normal zero line (status Z). Option 1 in Full mode: the valuation
+*&      type must exist in the target plant (3.3). Option 2 carries no
+*&      valuation type.
+*&---------------------------------------------------------------------*
+FORM f_zero_batch USING is_raw  TYPE gty_input_raw
+                        iv_full TYPE abap_bool
+                  CHANGING cs_out  TYPE gty_out
+                           ct_done TYPE gtt_done
+                           cv_done TYPE abap_bool.
+
+  DATA: ls_mrc  TYPE gty_marc,
+        ls_done TYPE gty_done,
+        lv_vt   TYPE bwtar_d,
+        lv_cerr TYPE abap_bool,
+        lv_cmsg TYPE bapi_msg.
+
+  cv_done = abap_false.
+  IF is_raw-charg IS INITIAL OR is_raw-nobat = abap_true.
+    RETURN.
+  ENDIF.
+  READ TABLE gt_marc INTO ls_mrc
+       WITH TABLE KEY matnr = is_raw-matnr werks = p_wsrc.
+  IF sy-subrc <> 0 OR ls_mrc-batchmgd = abap_false.
+    RETURN.
+  ENDIF.
+
+  cv_done = abap_true.
+  cs_out-xchpf = gc_xchpf.
+
+  IF p_split = abap_true.
+    IF iv_full = abap_true AND
+       lcl_help=>is_segment_created( iv_matnr = is_raw-matnr
+                                     iv_bwkey = p_wdst
+                                     iv_bwtar = is_raw-bwtar ) = abap_false.
+      cs_out-status  = gc_st_err.
+      cs_out-message = |Valuation type { is_raw-bwtar } not created in target plant { p_wdst }|.
+      PERFORM f_add_log USING gc_msgid '003' 'E' CHANGING cs_out.
+      RETURN.
+    ENDIF.
+    IF lcl_help=>is_split_valuated( iv_matnr = is_raw-matnr iv_bwkey = p_wdst ) = abap_true.
+      lv_vt = is_raw-bwtar.
+    ENDIF.
+  ENDIF.
+
+* log rows written so far must survive the BAPI rollback
+  PERFORM f_flush_logs CHANGING lv_cerr lv_cmsg.
+
+  READ TABLE ct_done INTO ls_done
+       WITH KEY matnr = is_raw-matnr charg = is_raw-charg.
+  IF sy-subrc <> 0.
+    CLEAR ls_done.
+    ls_done-matnr = is_raw-matnr.
+    ls_done-charg = is_raw-charg.
+    PERFORM f_extend_batch USING is_raw-matnr is_raw-charg lv_vt
+                           CHANGING ls_done-ok  ls_done-msg
+                                    ls_done-id  ls_done-no ls_done-ty.
+    INSERT ls_done INTO TABLE ct_done.
+  ENDIF.
+
+  IF ls_done-ok = abap_true.
+    cs_out-status  = COND #( WHEN p_test = abap_true THEN gc_st_test ELSE gc_st_ok ).
+    cs_out-message = |Zero stock - batch { is_raw-charg } created in plant { p_wdst }, | &&
+                     |no movement. { ls_done-msg }|.
+    PERFORM f_add_log USING space space 'S' CHANGING cs_out.
+  ELSE.
+    cs_out-status  = gc_st_err.
+    cs_out-message = |Batch extension failed. { ls_done-msg }|.
+    PERFORM f_add_log USING ls_done-id ls_done-no ls_done-ty CHANGING cs_out.
+  ENDIF.
 ENDFORM.
 
 *&---------------------------------------------------------------------*

@@ -1,6 +1,6 @@
 # ZPTP_SPLIT_VAL_MIG — User Guide
 
-2026-10-02 · program v0.6
+2026-10-06 · program v0.7
 
 ## 1. What the report does
 
@@ -91,6 +91,17 @@ The screen has four blocks. Its checks run only when you execute (F8, background
 | Posting date (P_BUDAT) | today | yes | Posting date of every 301 document. The period must be open. |
 
 Any of the three filters also narrows the "SAP stock missing from the file" check. Use them for tests or targeted runs; run the final migration without filters.
+
+### Running as a background job with a file from your PC
+
+A job cannot read a PC file (P_LOC). First run **ZPTP_SPLIT_VAL_MIG_UPLOAD** in dialog: pick the PC file, enter a path on the application server (for example in the DIR_HOME or a directory agreed with Basis), execute. Then schedule ZPTP_SPLIT_VAL_MIG with *Application server* (P_SRV) and the same path in P_FILE. Text symbol B01 of the upload report: *File copy*; selection texts: P_LFILE *File on the PC*, P_SFILE *Target path on the server*, P_OVR *Overwrite without asking*.
+
+### 3.1b Processing option (v0.7)
+
+| Field | Default | What it does |
+| --- | --- | --- |
+| Split Valuation Materials (P_SPLIT) | selected | Option 1: the materials of the input file are transferred, as before. |
+| Non split valuation materials (P_NONSPL) | — | Option 2: all materials with unrestricted stock in the source plant that are **not** in the input file are transferred (whole stock, missing batches created, no valuation type). A material that is split-valuated in the target plant is refused (message 025). The input file is still required: it tells the program which materials to leave out. Full/Direct mode is ignored. Simulation, restart and log work the same way. |
 
 ### 3.2 Input file
 

@@ -1,4 +1,4 @@
-# ZPTP_SPLIT_VAL_MIG — HBM Split Valuation (program v0.6)
+# ZPTP_SPLIT_VAL_MIG — HBM Split Valuation (program v0.8)
 
 Inter-plant transfer (mvt 301) of **unrestricted** stock from source plant **8P01** to the
 new Split-Valuation plant **8Q01**. Both plants are defaults on the selection screen and stay
@@ -20,6 +20,23 @@ This repository holds the code only; version history is kept in git (the former
 - `HIGH_LEVEL_OVERVIEW.md` — non-technical overview of the program.
 - `SAP ABAP Development Standard and Namimg Conventions.docx` — the customer's development
   standards and naming conventions (Sysmex D-Project, v1.2).
+
+## What changed in v0.8 (zero-stock batches)
+
+Checkbox `P_ZBAT` (both options): creates in the target plant the batches whose unrestricted
+stock in the source plant is 0, without any movement. New form `F_ZERO_BATCH`, called from the
+zero-quantity rule of `F_PROCESS_LINES`; option 2 adds the source-plant batches from MCHA.
+
+## What changed in v0.7 (processing option)
+
+New selection-screen block with two options. **1 Split Valuation Materials** (`P_SPLIT`,
+default) is the previous behaviour. **2 Non split valuation materials** (`P_NONSPL`) transfers
+the whole unrestricted stock of every source-plant material that is not in the input file:
+missing batch created in the target plant, 301 posted, no valuation type read or posted. The
+material must not be split-valuated in the target plant (message 025); batch management must
+match in both plants (026). New form `F_PREPARE_NONSPLIT`; the rest of the processing
+(`F_PROCESS_LINES`) is shared. Test run, restart and logs work for both options. Add text
+symbol `B05` and the two selection texts, and messages 025 / 026 to the class.
 
 ## What changed in v0.6 (storage-location mapping)
 | # | Change | Why |
@@ -143,6 +160,9 @@ leave *Dictionary Ref.* unticked, otherwise SAP replaces the text with the data 
 
 | Name | Text |
 |------|------|
+| P_ZBAT | Create batches with zero stock |
+| P_SPLIT | Split Valuation Materials |
+| P_NONSPL | Non split valuation materials |
 | P_WSRC | Source plant (P_WSRC) |
 | P_WDST | Target plant (P_WDST) |
 | S_MATNR | Material (S_MATNR) |
@@ -162,8 +182,8 @@ leave *Dictionary Ref.* unticked, otherwise SAP replaces the text with the data 
 | P_DEL | Delete run ID (P_DEL) |
 | P_CLR | Delete all logs before the run (P_CLR) |
 
-Text symbols: `T01`=STOCKS & BATCHES MIGRATION PROGRAM (screen heading), `B01`=Organizational data,
-`B02`=Input file, `B03`=Run control, `B04`=Maintenance.
+Text symbols: `B01`=Organizational data,
+`B05`=Processing option, `B02`=Input file, `B03`=Run control, `B04`=Maintenance.
 
 Program attribute *Title* (SE38 → Attributes, shown in the window title bar):
 `STOCKS & BATCHES MIGRATION PROGRAM`.

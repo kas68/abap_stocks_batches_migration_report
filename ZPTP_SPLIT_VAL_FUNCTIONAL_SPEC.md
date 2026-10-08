@@ -1,6 +1,6 @@
 # ZPTP_SPLIT_VAL_MIG — Functional Specification and User Guide
 
-2026-10-02 · program v0.6 (aligned on the source)
+2026-10-02 · program v0.7 (aligned on the source)
 
 ## 1. Purpose and scope
 
@@ -98,6 +98,20 @@ In simulation (P_TEST checked, the default), the program runs every check and ca
 ## 3. Selection screen
 
 The screen is titled **STOCKS & BATCHES MIGRATION PROGRAM** and has 18 parameters in four blocks. Each parameter is labelled *label (technical name)*, for example *Source plant (P_WSRC)*. Consistency checks run only on execution (F8, background job, print), not on every change on the screen. When the deletion option P_DEL is checked, only the RUN_ID is checked.
+
+### 3.0 Block "Processing option" (v0.7)
+
+| Parameter | Label | Default | Meaning and behaviour |
+| --- | --- | --- | --- |
+| P_SPLIT | Split Valuation Materials | checked | Option 1: unchanged behaviour. The materials of the input file that have stock in the source plant are transferred. |
+| P_NONSPL | Non split valuation materials | — | Option 2: every material with unrestricted stock in the source plant that is **not** in the input file is transferred with its whole unrestricted stock. The batch is created in the target plant when missing (batch-managed materials), then the 301 is posted. The file is read only to know which materials to exclude (a material is excluded as soon as one line of the file carries it, even a rejected line). Checks: material extended to the target plant (014), same batch management in both plants (026), material **not** split-valuated in the target plant (025). No valuation type is read or posted. P_FULL / P_DIR are ignored (these checks always run). Simulation, RUN_ID / reprocess, storage-location mapping and logging work as for option 1; the filters S_MATNR, S_CHARG and S_MTART apply to the stock read. |
+
+
+Additional parameter of this block:
+
+| Parameter | Label | Default | Meaning and behaviour |
+| --- | --- | --- | --- |
+| P_ZBAT | Create batches with zero stock | unchecked | Both options. The batch is created in the target plant when missing, although the unrestricted stock in the source plant is 0; **no movement** is posted. Option 1: file lines with quantity 0 and a batch (Full mode: the valuation type must exist in the target plant, 003). Option 2: batches of the source plant (not flagged for deletion) with no unrestricted stock, for materials not in the file. Only batch-managed materials. Log status S (T in simulation). Unchecked: a zero line keeps status Z and no batch is created. |
 
 ### 3.1 Block "Organizational data"
 
@@ -259,6 +273,8 @@ Each material document is committed in the same logical unit of work as its log 
 | 022 | Update failed after commit, document not posted | E |
 | 023 | Mapped storage location missing in the target plant | E |
 | 024 | No storage location mapping in ZPTP_SLOC_MAP for the issuing storage location | E |
+| 025 | Material split-valuated in the target plant, not eligible for option 2 | E |
+| 026 | Batch management differs between the two plants (option 2) | E |
 
 Errors returned by the SAP BAPIs (batch creation, goods movement) are logged with their own message class and number.
 

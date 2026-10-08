@@ -171,6 +171,10 @@ MESSAGE CLASS  ZPTP_SPLIT_VAL  (SE91) - used by the program
      transferred                                                    [v0.4]
 024  No mapping for storage location &1 of plant &2 to plant &3 in
      ZPTP_SLOC_MAP - line not transferred                           [v0.6]
+025  Material &1 is managed with split valuation in plant &2 - not
+     eligible for the non split valuation option                    [v0.7]
+026  Material &1: batch management differs between plant &2 and
+     plant &3                                                       [v0.7]
 (The program passes MSGID/MSGNO together with a free text in MSGTX; the entries
  above are required so MSGID/MSGNO resolve to a text when the log is reported on.
  009 is also used when the material number cannot be converted (MATN1).
