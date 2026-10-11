@@ -95,6 +95,19 @@ The program provides three major benefits:
 
 In short, this is a controlled migration tool for moving unrestricted stock while preserving valuation and batch consistency across plants.
 
+### Two processing options, zero-stock batches (v0.7 / v0.8)
+
+- **Split Valuation Materials:** the materials of the input file are transferred, as described above.
+- **Non split valuation materials:** every material with stock in the source plant that is *not* in the input file is transferred with its whole unrestricted stock; the missing batch is created and the 301 posted. The material must not be split-valuated in the target plant.
+- **Batches with zero stock:** an optional checkbox creates in the target plant the batches that have no unrestricted stock in the source plant, without any movement.
+- The result list is grouped and sorted by status, message, material and batch, and coloured: red for errors, yellow for warnings, green for simulated or posted lines.
+
+### Companion programs
+
+- `ZPTP_SPLIT_VAL_MIG_UTILITY` builds the input file from SAP data.
+- `ZPTP_SPLIT_VAL_MIG_UPLOAD` copies a PC file to the application server, so that the migration can run as a background job.
+- `ZPTP_SPLIT_VAL_BATCH_COPY` reads an Excel file (material, batch, valuation type) and copies the batch data from the source plant to the target plant, adding the valuation type of the file.
+
 ---
 
 ## Related repository files

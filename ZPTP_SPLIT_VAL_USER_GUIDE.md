@@ -102,6 +102,7 @@ A job cannot read a PC file (P_LOC). First run **ZPTP_SPLIT_VAL_MIG_UPLOAD** in 
 | --- | --- | --- |
 | Split Valuation Materials (P_SPLIT) | selected | Option 1: the materials of the input file are transferred, as before. |
 | Non split valuation materials (P_NONSPL) | — | Option 2: all materials with unrestricted stock in the source plant that are **not** in the input file are transferred (whole stock, missing batches created, no valuation type). A material that is split-valuated in the target plant is refused (message 025). The input file is still required: it tells the program which materials to leave out. Full/Direct mode is ignored. Simulation, restart and log work the same way. |
+| Create batches with zero stock (P_ZBAT) | unchecked | Both options. Creates in the target plant the batch-managed batches that have no unrestricted stock in the source plant (option 1: file lines with quantity 0 and a batch; option 2: batches of the source plant not in the file). No movement is posted. Status S (T in a simulation). Unchecked: a zero line stays status Z and nothing is created. |
 
 ### 3.2 Input file
 
@@ -238,7 +239,9 @@ The ALV list has one row per file line and per issuing storage location; the Sta
 | RUN_ID, Seq, Mode, Simulation | Run identification: sequence, FULL or DIRECT mode, X for a simulation |
 | Batch normalised | X when the batch value of the file was reduced to blank (see message 012) |
 
-The rows are grouped by status: T and S first, then E, W, Z, I and X. Inside a status the order of the file is kept.
+The rows are grouped by status: T and S first, then E, W, Z, I and X, with a separator line between statuses. Inside a status they are sorted by message, material and batch. Colours: red = message type E, A or I; yellow = W; green = simulated or posted (T, S). The text colour follows the SAP GUI theme.
+
+Units: a unit with μ (micro) or ρ in the file is recognised whether μ is the micro sign or the Greek mu. If a unit is still refused (message 017), the file is probably not saved in UTF-8: save it again as UTF-8.
 
 Useful ALV functions: filter on Status, sort by Msg No, subtotal Qty Posted by material, and export to a spreadsheet (List > Export) for the business review.
 
@@ -298,6 +301,8 @@ Every blocked line carries a message of class ZPTP_SPLIT_VAL, or the message of 
 | 020 | E | Source batch cannot be read in 8P01 | Check the batch in MSC3N for 8P01. |
 | 022 | E | Update failed after commit, document not posted | Check SM13 for the failed update, correct, then reprocess. |
 | 023 | E | Mapped target storage location missing in 8Q01 | Correct the target storage location in ZPTP_SLOC_MAP, or create it in 8Q01 (OX09, MM customizing team). |
+| 025 | E | Option 2: material split-valuated in 8Q01 | Include the material in the input file with its valuation type and run option 1, or correct the material master. |
+| 026 | E | Option 2: batch management differs between 8P01 and 8Q01 | Align the batch management indicator in both plants, then reprocess. |
 | 024 | E | No entry in ZPTP_SLOC_MAP for the issuing storage location (shown in Src SLoc) | Add the entry 8P01 / storage location / 8Q01 / target storage location with SM30, then reprocess. |
 | other | E | Message from BAPI_GOODSMVT_CREATE or BAPI_BATCH_CREATE (for example M7, 12) | Read Msg Class and Msg No in SE91; typical causes are a closed period, a locked material or a missing authorization. |
 

@@ -97,7 +97,15 @@ En simulation (P_TEST coché, valeur par défaut), le programme exécute tous le
 
 ## 3. Écran de sélection
 
-L'écran porte le titre **STOCKS & BATCHES MIGRATION PROGRAM** et regroupe 18 paramètres en quatre blocs. Chaque paramètre est libellé *libellé (nom technique)*, par exemple *Source plant (P_WSRC)* ; les libellés de l'écran sont en anglais. Les contrôles de cohérence ne s'exécutent qu'au lancement (F8, job d'arrière-plan, impression), pas à chaque changement de sélection. Quand l'option de suppression P_DEL est cochée, seul le RUN_ID est contrôlé.
+L'écran regroupe 21 paramètres en cinq blocs (le bloc « Processing option » a été ajouté en v0.7 ; le cadre extérieur titré STOCKS & BATCHES MIGRATION PROGRAM a été supprimé). Chaque paramètre est libellé *libellé (nom technique)*, par exemple *Source plant (P_WSRC)* ; les libellés de l'écran sont en anglais. Les contrôles de cohérence ne s'exécutent qu'au lancement (F8, job d'arrière-plan, impression), pas à chaque changement de sélection. Quand l'option de suppression P_DEL est cochée, seul le RUN_ID est contrôlé.
+
+### 3.0 Bloc « Processing option » (v0.7, P_ZBAT v0.8)
+
+| Paramètre | Libellé | Défaut | Signification et fonctionnement |
+| --- | --- | --- | --- |
+| P_SPLIT | Split Valuation Materials | coché | Option 1 : comportement inchangé. Les articles du fichier d'entrée qui ont du stock dans l'usine émettrice sont transférés. |
+| P_NONSPL | Non split valuation materials | — | Option 2 : tous les articles ayant du stock libre dans l'usine émettrice qui ne sont **pas** dans le fichier sont transférés avec la totalité de leur stock libre. Le lot est créé dans l'usine cible s'il manque (articles gérés par lot), puis le 301 est posté. Le fichier sert uniquement à connaître les articles à exclure (un article est exclu dès qu'une ligne du fichier le porte, même rejetée). Contrôles : article étendu à l'usine cible (014), même gestion par lot dans les deux usines (026), article **non** valorisé séparément dans l'usine cible (025). Aucun type de valorisation n'est lu ni posté. P_FULL / P_DIR sont ignorés. Simulation, RUN_ID / reprise, mapping des magasins et log fonctionnent comme pour l'option 1 ; les filtres S_MATNR, S_CHARG et S_MTART s'appliquent à la lecture du stock. |
+| P_ZBAT | Create batches with zero stock | décoché | Les deux options. Le lot est créé dans l'usine cible s'il manque, bien que le stock libre de l'usine émettrice soit 0 ; **aucun mouvement** n'est posté. Option 1 : lignes du fichier à quantité 0 avec un lot (mode Full : le type de valorisation doit exister dans l'usine cible, 003). Option 2 : lots de l'usine émettrice (non marqués à supprimer) sans stock libre, pour les articles absents du fichier. Articles gérés par lot uniquement. Statut S (T en simulation). Décoché : une ligne à zéro reste en statut Z et aucun lot n'est créé. |
 
 ### 3.1 Bloc « Organizational data »
 
@@ -152,6 +160,8 @@ Le fichier est un fichier texte à plat, avec une ligne par combinaison article 
 | 3 | BWTAR | oui | Type de valorisation cible dans l'usine 8Q01. Vide : ligne rejetée (009). |
 | 4 | QUANTITY | oui | Quantité à transférer, dans l'unité de base de l'article. Non numérique : rejet (007). Négative : rejet (008). Zéro : aucun mouvement (statut Z). |
 | 5 | UOM | non | Unité de mesure. Elle doit être l'unité de base de l'article (MARA-MEINS). Inconnue : rejet (017). Différente de l'unité de base : rejet (018). Vide : l'unité de base est retenue. |
+
+**Unité de mesure et caractères spéciaux (v0.8).** L'unité est convertie de sa forme externe (par exemple PC en ST). Elle est essayée telle que saisie, puis en majuscules, chaque fois avec le signe micro (U+00B5) et avec le mu grec (U+03BC) : des unités comme μg ou μL sont reconnues quel que soit le caractère du fichier. Un fichier local est lu en octets puis décodé en UTF-8, avec repli sur Windows-1252, de sorte que μ et ρ survivent au chargement.
 
 Les colonnes supplémentaires après la cinquième sont ignorées. Une ligne de moins de cinq colonnes est rejetée (009), sauf la première ligne, alors considérée comme un en-tête et ignorée.
 
@@ -224,6 +234,8 @@ Colonnes affichées : statut, article, lot, indicateur de gestion en lot, type d
 
 Le magasin émetteur est celui où se trouve actuellement le stock ; le magasin récepteur est celui qui lui est associé dans ZPTP_SLOC_MAP. Les deux sont aussi affichés, une ligne par magasin émetteur détenant du stock, pour une ligne rejetée avant la répartition (statuts Z et E pour les messages 002 à 005) ; le magasin récepteur est vide si le magasin émetteur n'a pas d'association. Une ligne sans stock (006) n'a pas de magasin.
 
+Depuis la v0.8, les lignes sont groupées par statut (T, S, E, W, Z, I, X) avec une ligne de séparation entre deux statuts, puis triées par message (classe et numéro), article, lot et magasin émetteur. Les lignes sont colorées selon le type de message : rouge pour E, A et I, jaune pour W, vert pour une ligne simulée ou postée (T, S). La couleur du texte dépend du thème du SAP GUI.
+
 ### 5.3 Tables de log
 
 | Table | Contenu | Clé |
@@ -259,8 +271,18 @@ Chaque document article est validé dans la même unité de traitement que ses l
 | 022 | Mise à jour échouée après validation, document non posté | E |
 | 023 | Magasin associé absent de l'usine cible | E |
 | 024 | Pas de correspondance dans ZPTP_SLOC_MAP pour le magasin émetteur | E |
+| 025 | Article valorisé séparément dans l'usine cible, non éligible à l'option 2 | E |
+| 026 | Gestion par lot différente entre les deux usines (option 2) | E |
 
 Les erreurs renvoyées par les BAPI SAP (création de lot, mouvement) sont reprises avec leur propre classe et numéro de message.
+
+## 5b. Programmes complémentaires
+
+| Programme | Rôle |
+| --- | --- |
+| ZPTP_SPLIT_VAL_MIG_UTILITY | Construit le fichier CSV d'entrée à partir du stock SAP et des types de valorisation de l'usine cible. |
+| ZPTP_SPLIT_VAL_MIG_UPLOAD | Dialogue uniquement. Copie un fichier du PC vers le serveur d'application (copie binaire, confirmation avant écrasement), pour que ZPTP_SPLIT_VAL_MIG puisse tourner en arrière-plan avec P_SRV. Un job ne peut pas lire un fichier du PC. |
+| ZPTP_SPLIT_VAL_BATCH_COPY | Lit un fichier Excel (.xlsx : ligne 1 en-tête ; A article, B lot, C type de valorisation). Pour chaque ligne, lit les données du lot au niveau usine dans l'usine émettrice et crée le lot dans l'usine cible avec les mêmes attributs et le type de valorisation du fichier. Contrôles : colonnes renseignées, article étendu et géré par lot dans les deux usines, type de valorisation existant dans l'usine cible, lot source existant, pas de lot avec deux types de valorisation dans le fichier ; un lot déjà présent dans l'usine cible n'est pas modifié (S si même type de valorisation, E sinon). P_TEST (défaut coché) : contrôles seuls, aucune création. Résultat en liste ALV, pas de log en base. |
 
 ## 6. Reprise, maintenance et points ouverts
 

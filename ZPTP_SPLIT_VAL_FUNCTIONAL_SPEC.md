@@ -97,20 +97,15 @@ In simulation (P_TEST checked, the default), the program runs every check and ca
 
 ## 3. Selection screen
 
-The screen is titled **STOCKS & BATCHES MIGRATION PROGRAM** and has 18 parameters in four blocks. Each parameter is labelled *label (technical name)*, for example *Source plant (P_WSRC)*. Consistency checks run only on execution (F8, background job, print), not on every change on the screen. When the deletion option P_DEL is checked, only the RUN_ID is checked.
+The screen has 21 parameters in five blocks (the "Processing option" block was added in v0.7; the outer frame titled STOCKS & BATCHES MIGRATION PROGRAM was removed). Each parameter is labelled *label (technical name)*, for example *Source plant (P_WSRC)*. Consistency checks run only on execution (F8, background job, print), not on every change on the screen. When the deletion option P_DEL is checked, only the RUN_ID is checked.
 
-### 3.0 Block "Processing option" (v0.7)
+### 3.0 Block "Processing option" (v0.7, P_ZBAT v0.8)
 
 | Parameter | Label | Default | Meaning and behaviour |
 | --- | --- | --- | --- |
 | P_SPLIT | Split Valuation Materials | checked | Option 1: unchanged behaviour. The materials of the input file that have stock in the source plant are transferred. |
 | P_NONSPL | Non split valuation materials | — | Option 2: every material with unrestricted stock in the source plant that is **not** in the input file is transferred with its whole unrestricted stock. The batch is created in the target plant when missing (batch-managed materials), then the 301 is posted. The file is read only to know which materials to exclude (a material is excluded as soon as one line of the file carries it, even a rejected line). Checks: material extended to the target plant (014), same batch management in both plants (026), material **not** split-valuated in the target plant (025). No valuation type is read or posted. P_FULL / P_DIR are ignored (these checks always run). Simulation, RUN_ID / reprocess, storage-location mapping and logging work as for option 1; the filters S_MATNR, S_CHARG and S_MTART apply to the stock read. |
 
-
-Additional parameter of this block:
-
-| Parameter | Label | Default | Meaning and behaviour |
-| --- | --- | --- | --- |
 | P_ZBAT | Create batches with zero stock | unchecked | Both options. The batch is created in the target plant when missing, although the unrestricted stock in the source plant is 0; **no movement** is posted. Option 1: file lines with quantity 0 and a batch (Full mode: the valuation type must exist in the target plant, 003). Option 2: batches of the source plant (not flagged for deletion) with no unrestricted stock, for materials not in the file. Only batch-managed materials. Log status S (T in simulation). Unchecked: a zero line keeps status Z and no batch is created. |
 
 ### 3.1 Block "Organizational data"
@@ -166,6 +161,8 @@ The input file is a flat text file with one line per material / batch / valuatio
 | 3 | BWTAR | yes | Target valuation type in plant 8Q01. Blank: line rejected (009). |
 | 4 | QUANTITY | yes | Quantity to transfer, in the material's base unit. Non-numeric: rejected (007). Negative: rejected (008). Zero: no movement (status Z). |
 | 5 | UOM | no | Unit of measure. Must be the material's base unit (MARA-MEINS). Unknown: rejected (017). Different from the base unit: rejected (018). Blank: the base unit is used. |
+
+**Unit of measure and special characters (v0.8).** The unit is converted from its external form (for example PC to ST). It is tried as typed, then in upper case, each time with the micro sign (U+00B5) and with the Greek small mu (U+03BC), so units such as μg or μL are recognised whichever character the file carries. A local file is read as bytes and decoded as UTF-8, falling back to Windows-1252, so μ and ρ survive the upload.
 
 Extra columns after the fifth are ignored. A line with fewer than five columns is rejected (009), except the first line, which is then taken as a header and skipped.
 
@@ -232,7 +229,7 @@ At the end of the run, the program displays an ALV list with one row per process
 
 ### 5.2 ALV list
 
-The list can be restricted to some statuses with S_STAT (blank = all). Rows are grouped by status in this order: T, S, E, W, Z, I, X, so the simulated and posted lines come first; the original order is kept inside a status.
+The list can be restricted to some statuses with S_STAT (blank = all). Rows are grouped by status in this order: T, S, E, W, Z, I, X, so the simulated and posted lines come first, with a separator line between two statuses. Inside a status the rows are sorted by message (class and number), material, batch and issuing storage location. Rows are coloured by message type: red for E, A and I, yellow for W, green for a simulated or posted line (T, S). The text colour follows the SAP GUI theme.
 
 Columns displayed: status, material, batch, batch-management flag, valuation type, issuing plant and storage location, receiving plant and storage location, posted quantity, unit, file quantity, SAP stock, variance, material document and year, message type, class and number, message text, RUN_ID, sequence, mode, simulation flag and batch-normalised flag (the batch value of the file was reduced to blank).
 
@@ -277,6 +274,14 @@ Each material document is committed in the same logical unit of work as its log 
 | 026 | Batch management differs between the two plants (option 2) | E |
 
 Errors returned by the SAP BAPIs (batch creation, goods movement) are logged with their own message class and number.
+
+## 5b. Companion programs
+
+| Program | Purpose |
+| --- | --- |
+| ZPTP_SPLIT_VAL_MIG_UTILITY | Builds the CSV input file from SAP stock and the valuation types of the target plant. |
+| ZPTP_SPLIT_VAL_MIG_UPLOAD | Dialog only. Copies a file from the PC to the application server (binary copy, confirmation before overwriting), so that ZPTP_SPLIT_VAL_MIG can run as a background job with P_SRV. A background job cannot read a PC file. |
+| ZPTP_SPLIT_VAL_BATCH_COPY | Reads an Excel file (.xlsx: line 1 header; A material, B batch, C valuation type). For each line, reads the batch data at plant level in the source plant and creates the batch in the target plant with the same attributes and the valuation type of the file. Checks: columns filled, material extended and batch-managed in both plants, valuation type existing in the target plant, source batch existing, no batch with two valuation types in the file; an existing target batch is not changed (S if same valuation type, E otherwise). P_TEST (default on): checks only, no creation. Result in an ALV list, no database log. |
 
 ## 6. Restart, maintenance and open points
 

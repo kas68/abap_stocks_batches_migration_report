@@ -23,6 +23,19 @@ This repository holds the code only; version history is kept in git (the former
 
 ## What changed in v0.8 (zero-stock batches)
 
+Also in v0.8:
+- **Units:** `F_CONVERT_UNIT` replaces the direct `CONVERSION_EXIT_CUNIT_INPUT`. The unit is no longer
+  upper-cased up front (upper case turned μ into a capital Mu no unit knows); the variants as typed /
+  upper case × micro sign U+00B5 / Greek mu U+03BC are tried in turn.
+- **Local file:** `F_READ_LINES_LOCAL` uploads in `BIN` mode and decodes UTF-8, falling back to
+  Windows-1252 (code page 1160), removes the BOM and the carriage returns. `GUI_UPLOAD` in `ASC` mode
+  damaged μ / ρ through the GUI code page.
+- **ALV:** sort by `SORT_KEY`, `STATUS` (separator line), `MSGID`, `MSGNO`, `MATNR`, `CHARG`; row colour
+  through the hidden field `ROWCOLOR` (`INFO_FIELDNAME`): `C611` red for message type E / A / I,
+  `C311` yellow for W, `C511` green for status T / S. The zebra layout was dropped (it hides the colour).
+- **Messages 025 / 026** (option 2) and the removal of the outer frame `B0` / text symbol `T01`.
+- **New programs:** `ZPTP_SPLIT_VAL_MIG_UPLOAD` and `ZPTP_SPLIT_VAL_BATCH_COPY` (see the functional spec, section 5b).
+
 Checkbox `P_ZBAT` (both options): creates in the target plant the batches whose unrestricted
 stock in the source plant is 0, without any movement. New form `F_ZERO_BATCH`, called from the
 zero-quantity rule of `F_PROCESS_LINES`; option 2 adds the source-plant batches from MCHA.
@@ -456,8 +469,9 @@ first value goes in the field, the others are appended to `S_STAT`).
 
 ## ALV order and columns
 `F_DISPLAY_ALV` sets `SORT_KEY` (hidden) from the position of the status in `TSEWZIX` (unknown = 9),
-sorts `GT_OUT` STABLE by it and passes `SORT_KEY` / `STATUS` as the ALV sort, so the rows are grouped
-by status with T and S first. All fields of `GTY_OUT` are displayed except `SORT_KEY`, including
+sorts `GT_OUT` STABLE by `SORT_KEY`, message, material, batch and storage location, and passes the same
+keys as the ALV sort (`STATUS` with a separator line), so the rows are grouped by status with T and S first.
+`ROWCOLOR` (hidden) carries the row colour. All fields of `GTY_OUT` are displayed except `SORT_KEY`, including
 `MSGTY` and `NORMBAT`.
 
 ## Utility report (ZPTP_SPLIT_VAL_MIG_UTILITY)

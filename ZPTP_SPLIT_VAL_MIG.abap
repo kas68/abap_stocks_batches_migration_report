@@ -296,6 +296,7 @@ TYPES: BEGIN OF gty_out,
          message    TYPE bapi_msg,
          normbat    TYPE abap_bool,   " batch value normalised to blank
          sort_key   TYPE c LENGTH 1,  " display order of the status, ALV only
+         rowcolor   TYPE c LENGTH 4,  " ALV row colour, ALV only
        END OF gty_out.
 TYPES: gtt_out TYPE STANDARD TABLE OF gty_out WITH DEFAULT KEY.
 
@@ -1008,13 +1009,21 @@ ENDFORM.
 *&      Form  F_READ_LINES_LOCAL   (GUI_UPLOAD)
 *&---------------------------------------------------------------------*
 FORM f_read_lines_local CHANGING ct_lines TYPE stringtab.
-  DATA: lt_data TYPE STANDARD TABLE OF string,
+* Read as bytes and decode here: GUI_UPLOAD in ASC mode uses the code
+* page of the SAP GUI, which damages μ / ρ in a UTF-8 file (the file
+* written by ZPTP_SPLIT_VAL_MIG_UTILITY is UTF-8). UTF-8 first, then
+* Windows-1252 for a file saved by an older Excel.             [v0.8]
+  DATA: lt_bin  TYPE STANDARD TABLE OF x255,
+        lv_len  TYPE i,
+        lv_xstr TYPE xstring,
+        lv_text TYPE string,
         lv_fn   TYPE string.
   lv_fn = p_file.
   CALL METHOD cl_gui_frontend_services=>gui_upload
     EXPORTING  filename = lv_fn
-               filetype = 'ASC'
-    CHANGING   data_tab = lt_data
+               filetype = 'BIN'
+    IMPORTING  filelength = lv_len
+    CHANGING   data_tab = lt_bin
     EXCEPTIONS file_open_error = 1 file_read_error = 2 no_batch = 3
                gui_refuse_filetransfer = 4 invalid_type = 5 no_authority = 6
                unknown_error = 7 bad_data_format = 8 header_not_allowed = 9
@@ -1025,7 +1034,36 @@ FORM f_read_lines_local CHANGING ct_lines TYPE stringtab.
   IF sy-subrc <> 0.
     MESSAGE |Cannot read local input file { p_file } (rc={ sy-subrc })| TYPE 'E'.
   ENDIF.
-  ct_lines = lt_data.
+  CALL FUNCTION 'SCMS_BINARY_TO_XSTRING'
+    EXPORTING  input_length = lv_len
+    IMPORTING  buffer       = lv_xstr
+    TABLES     binary_tab   = lt_bin
+    EXCEPTIONS failed       = 1 OTHERS = 2.
+  IF sy-subrc <> 0.
+    MESSAGE |Cannot convert local input file { p_file }| TYPE 'E'.
+  ENDIF.
+
+  TRY.
+      cl_abap_conv_in_ce=>create( encoding    = 'UTF-8'
+                                  ignore_cerr = abap_false
+                                  input       = lv_xstr )->read( IMPORTING data = lv_text ).
+    CATCH cx_root.
+      TRY.
+          cl_abap_conv_in_ce=>create( encoding    = '1160'      " Windows-1252
+                                      ignore_cerr = abap_true
+                                      input       = lv_xstr )->read( IMPORTING data = lv_text ).
+        CATCH cx_root.
+          MESSAGE |Cannot decode local input file { p_file }| TYPE 'E'.
+      ENDTRY.
+  ENDTRY.
+
+* byte order mark, carriage returns
+  IF lv_text IS NOT INITIAL AND lv_text(1) = cl_abap_conv_in_ce=>uccp( 'FEFF' ).
+    lv_text = lv_text+1.
+  ENDIF.
+  REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>cr_lf
+          IN lv_text WITH cl_abap_char_utilities=>newline.
+  SPLIT lv_text AT cl_abap_char_utilities=>newline INTO TABLE ct_lines.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
@@ -1044,6 +1082,7 @@ FORM f_parse_lines USING it_lines TYPE stringtab
         lv_idx   TYPE i,
         lv_num   TYPE abap_bool,
         lv_uom_ext TYPE meins,
+        lv_uom_ok  TYPE abap_bool,
         lv_fmat    TYPE matnr.
 
   LOOP AT it_lines INTO lv_line.
@@ -1141,21 +1180,19 @@ FORM f_parse_lines USING it_lines TYPE stringtab
       PERFORM f_add_log USING gc_msgid '009' 'E' CHANGING ls_out.
       CONTINUE.
     ENDIF.
+*   the unit is NOT upper-cased here: it would turn the micro sign / Greek
+*   mu into a capital Mu that no unit knows; F_CONVERT_UNIT tries the
+*   variants.                                                  [v0.8]
     TRANSLATE: ls_raw-charg TO UPPER CASE,
-               ls_raw-bwtar TO UPPER CASE,
-               ls_raw-meins TO UPPER CASE.
+               ls_raw-bwtar TO UPPER CASE.
 
 *   --- unit of measure: file (external) -> internal, e.g. PC -> ST ---
 *   A blank unit is read later as the base unit.             [v0.3-19]
     IF ls_raw-meins IS NOT INITIAL.
       lv_uom_ext = ls_raw-meins.
-      CALL FUNCTION 'CONVERSION_EXIT_CUNIT_INPUT'
-        EXPORTING  input          = lv_uom_ext
-                   language       = sy-langu
-        IMPORTING  output         = ls_raw-meins
-        EXCEPTIONS unit_not_found = 1
-                   OTHERS         = 2.
-      IF sy-subrc <> 0.
+      PERFORM f_convert_unit USING lv_uom_ext
+                             CHANGING ls_raw-meins lv_uom_ok.
+      IF lv_uom_ok = abap_false.
         CLEAR ls_out.
         ls_out-matnr     = ls_raw-matnr.
         ls_out-charg     = ls_raw-charg.
@@ -1211,6 +1248,62 @@ FORM f_parse_lines USING it_lines TYPE stringtab
 *   selection-screen restriction
     CHECK ls_raw-matnr IN s_matnr AND ls_raw-charg IN s_charg.
     APPEND ls_raw TO ct_raw.
+  ENDLOOP.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_CONVERT_UNIT                                    [v0.8]
+*&      External unit of the file -> internal unit. The value is tried as
+*&      typed, then upper-cased, each time with the micro sign (U+00B5)
+*&      and with the Greek small mu (U+03BC): both look the same on screen
+*&      but are different characters, and the file may carry either one.
+*&---------------------------------------------------------------------*
+FORM f_convert_unit USING    iv_ext TYPE meins
+                    CHANGING cv_int TYPE meins
+                             cv_ok  TYPE abap_bool.
+
+  DATA: lt_try   TYPE STANDARD TABLE OF string WITH DEFAULT KEY,
+        lv_try   TYPE string,
+        lv_ext   TYPE string,
+        lv_inp   TYPE meins,
+        lv_micro TYPE string,
+        lv_mu    TYPE string,
+        lv_capmu TYPE string.
+
+  cv_ok    = abap_false.
+  lv_micro = cl_abap_conv_in_ce=>uccp( '00B5' ).
+  lv_mu    = cl_abap_conv_in_ce=>uccp( '03BC' ).
+  lv_capmu = cl_abap_conv_in_ce=>uccp( '039C' ).
+
+  DO 2 TIMES.
+    lv_ext = iv_ext.
+    IF sy-index = 2.
+      lv_ext = to_upper( lv_ext ).
+    ENDIF.
+    lv_try = lv_ext.                              " as typed / upper-cased
+    APPEND lv_try TO lt_try.
+    lv_try = lv_ext.
+    REPLACE ALL OCCURRENCES OF lv_mu    IN lv_try WITH lv_micro.
+    REPLACE ALL OCCURRENCES OF lv_capmu IN lv_try WITH lv_micro.
+    APPEND lv_try TO lt_try.
+    lv_try = lv_ext.
+    REPLACE ALL OCCURRENCES OF lv_micro IN lv_try WITH lv_mu.
+    REPLACE ALL OCCURRENCES OF lv_capmu IN lv_try WITH lv_mu.
+    APPEND lv_try TO lt_try.
+  ENDDO.
+
+  LOOP AT lt_try INTO lv_try.
+    lv_inp = lv_try.
+    CALL FUNCTION 'CONVERSION_EXIT_CUNIT_INPUT'
+      EXPORTING  input          = lv_inp
+                 language       = sy-langu
+      IMPORTING  output         = cv_int
+      EXCEPTIONS unit_not_found = 1
+                 OTHERS         = 2.
+    IF sy-subrc = 0.
+      cv_ok = abap_true.
+      RETURN.
+    ENDIF.
   ENDLOOP.
 ENDFORM.
 
@@ -2255,7 +2348,9 @@ FORM f_zero_batch USING is_raw  TYPE gty_input_raw
         ls_done TYPE gty_done,
         lv_vt   TYPE bwtar_d,
         lv_cerr TYPE abap_bool,
-        lv_cmsg TYPE bapi_msg.
+        lv_cmsg TYPE bapi_msg,
+        lv_noid TYPE symsgid,          " empty message id / number for the log
+        lv_nono TYPE symsgno.
 
   cv_done = abap_false.
   IF is_raw-charg IS INITIAL OR is_raw-nobat = abap_true.
@@ -2304,7 +2399,7 @@ FORM f_zero_batch USING is_raw  TYPE gty_input_raw
     cs_out-status  = COND #( WHEN p_test = abap_true THEN gc_st_test ELSE gc_st_ok ).
     cs_out-message = |Zero stock - batch { is_raw-charg } created in plant { p_wdst }, | &&
                      |no movement. { ls_done-msg }|.
-    PERFORM f_add_log USING space space 'S' CHANGING cs_out.
+    PERFORM f_add_log USING lv_noid lv_nono 'S' CHANGING cs_out.
   ELSE.
     cs_out-status  = gc_st_err.
     cs_out-message = |Batch extension failed. { ls_done-msg }|.
@@ -2736,8 +2831,15 @@ FORM f_display_alv.
   LOOP AT gt_out ASSIGNING FIELD-SYMBOL(<ls_out>).
     DATA(lv_pos) = find( val = lc_order sub = <ls_out>-status ).
     <ls_out>-sort_key = COND #( WHEN lv_pos >= 0 THEN lv_pos ELSE 9 ).
+*   row colour (inverse = coloured background): red for message type
+*   E / A / I, yellow for W, green for a simulated or posted line (T, S)
+    <ls_out>-rowcolor = COND #(
+      WHEN <ls_out>-msgty CA 'EAI'                          THEN 'C611'
+      WHEN <ls_out>-msgty = 'W'                             THEN 'C311'
+      WHEN <ls_out>-status CA 'TS' OR <ls_out>-msgty = 'S'  THEN 'C511'
+      ELSE space ).
   ENDLOOP.
-  SORT gt_out STABLE BY sort_key.
+  SORT gt_out STABLE BY sort_key msgid msgno matnr charg lgort_src.
 
   DEFINE add_col.
     CLEAR ls_fcat.
@@ -2774,10 +2876,16 @@ FORM f_display_alv.
   add_col 'SORT_KEY'   'Sort'.
   ls_fcat-no_out = abap_true.
   MODIFY lt_fcat FROM ls_fcat INDEX lines( lt_fcat ).
+* grouped by status (a separator line between two statuses), then by
+* message (class / number), then by material and batch
   lt_sort = VALUE #( ( spos = 1 fieldname = 'SORT_KEY' up = abap_true )
-                     ( spos = 2 fieldname = 'STATUS'   up = abap_true ) ).
+                     ( spos = 2 fieldname = 'STATUS'   up = abap_true group = 'UL' )
+                     ( spos = 3 fieldname = 'MSGID'    up = abap_true )
+                     ( spos = 4 fieldname = 'MSGNO'    up = abap_true )
+                     ( spos = 5 fieldname = 'MATNR'    up = abap_true )
+                     ( spos = 6 fieldname = 'CHARG'    up = abap_true ) ).
   ls_lay-colwidth_optimize = abap_true.
-  ls_lay-zebra = abap_true.
+  ls_lay-info_fieldname    = 'ROWCOLOR'.
   CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
     EXPORTING i_callback_program = sy-repid
               is_layout   = ls_lay
