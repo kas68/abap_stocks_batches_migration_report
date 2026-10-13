@@ -193,5 +193,6 @@ DDIC STANDARDS TO APPLY WHEN CREATING THE OBJECTS (standard sec. 4.19)
 - If an SM30 maintenance view is generated: "Log Data Changes" on and an
   authorization group other than &NC&. As the log is the audit trail,
   display-only maintenance is preferred.
-- Transaction code, if one is needed: ZPTP_SPLIT_VAL_MIG (Z<WS_ID>_<name>).
+- Transaction code ZPTP_SPLIT_VAL_MIG (Z<WS_ID>_<name>), created in SE93 as a report
+  transaction (program ZPTP_SPLIT_VAL_MIG, screen 1000). Add it to the roles (S_TCODE).
 ********************************************************************************

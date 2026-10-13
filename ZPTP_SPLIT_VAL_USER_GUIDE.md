@@ -20,7 +20,7 @@ The report handles batch-managed and non-batch-managed materials. It does not mo
 | --- | --- |
 | Program | ZPTP_SPLIT_VAL_MIG (version 0.5) |
 | Screen title | STOCKS & BATCHES MIGRATION PROGRAM |
-| Start from | SE38 or SA38 (no transaction code yet) |
+| Start from | Transaction ZPTP_SPLIT_VAL_MIG (or SE38 / SA38) |
 | Movement type | 301, one-step plant-to-plant transfer |
 | Default plants | 8P01 (source) to 8Q01 (target) |
 | Log tables | ZPTP_MOV_EXEC (movements), ZPTP_BATCH_EXT (batches) |
@@ -64,7 +64,7 @@ The header line is optional. The storage location, plants, movement type and pos
 
 | Task | Authorization |
 | --- | --- |
-| Start the report | SE38 or SA38 |
+| Start the report | Transaction ZPTP_SPLIT_VAL_MIG (or SE38 / SA38). Needs the transaction in your role (S_TCODE) |
 | Post the 301 movements | Standard goods movement checks of BAPI_GOODSMVT_CREATE (plants 8P01 and 8Q01, movement type 301) |
 | Create batches in 8Q01 | Standard checks of BAPI_BATCH_CREATE |
 | Read a server file | Read access to the file path (S_DATASET) |
@@ -145,7 +145,7 @@ The migration is a cycle: simulate, correct, simulate again until clean, post on
 
 ### Step 2 — Run a full simulation
 
-1. Start SE38 (or SA38), enter ZPTP_SPLIT_VAL_MIG and press F8.
+1. Start transaction ZPTP_SPLIT_VAL_MIG (or SE38 / SA38, enter ZPTP_SPLIT_VAL_MIG and press F8).
 2. Keep plants 8P01 and 8Q01, leave Receiving SLoc and all filters blank.
 3. Set the posting date you will use for the real run.
 4. Choose Application server (or Local file), enter the path with F4 and keep the separator `;`.
