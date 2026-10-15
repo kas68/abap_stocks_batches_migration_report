@@ -280,9 +280,9 @@ Les erreurs renvoyées par les BAPI SAP (création de lot, mouvement) sont repri
 
 | Programme | Rôle |
 | --- | --- |
-| ZPTP_SPLIT_VAL_MIG_UTILITY | Construit le fichier CSV d'entrée à partir du stock SAP et des types de valorisation de l'usine cible. |
-| ZPTP_SPLIT_VAL_MIG_UPLOAD | Dialogue uniquement. Copie un fichier du PC vers le serveur d'application (copie binaire, confirmation avant écrasement), pour que ZPTP_SPLIT_VAL_MIG puisse tourner en arrière-plan avec P_SRV. Un job ne peut pas lire un fichier du PC. |
-| ZPTP_SPLIT_VAL_BATCH_COPY | Lit un fichier Excel (.xlsx : ligne 1 en-tête ; A article, B lot, C type de valorisation). Pour chaque ligne, lit les données du lot au niveau usine dans l'usine émettrice et crée le lot dans l'usine cible avec les mêmes attributs et le type de valorisation du fichier. Contrôles : colonnes renseignées, article étendu et géré par lot dans les deux usines, type de valorisation existant dans l'usine cible, lot source existant, pas de lot avec deux types de valorisation dans le fichier ; un lot déjà présent dans l'usine cible n'est pas modifié (S si même type de valorisation, E sinon). P_TEST (défaut coché) : contrôles seuls, aucune création. Résultat en liste ALV, pas de log en base. |
+| ZPTP_SPLIT_VAL_MIG_UTILITY (transaction ZPTP_SPLIT_VAL_UTIL) | Construit le fichier CSV d'entrée à partir du stock SAP et des types de valorisation de l'usine cible. |
+| ZPTP_SPLIT_VAL_MIG_UPLOAD (transaction ZPTP_SPLIT_VAL_UPLD) | Dialogue uniquement. Copie un fichier du PC vers le serveur d'application (copie binaire, confirmation avant écrasement), pour que ZPTP_SPLIT_VAL_MIG puisse tourner en arrière-plan avec P_SRV. Un job ne peut pas lire un fichier du PC. |
+| ZPTP_SPLIT_VAL_BATCH_COPY (transaction ZPTP_SPLIT_VAL_BCPY) | Lit un fichier Excel (.xlsx : ligne 1 en-tête ; A article, B lot, C type de valorisation). Pour chaque ligne, lit les données du lot au niveau usine dans l'usine émettrice et crée le lot dans l'usine cible avec les mêmes attributs et le type de valorisation du fichier. Contrôles : colonnes renseignées, article étendu et géré par lot dans les deux usines, type de valorisation existant dans l'usine cible, lot source existant, pas de lot avec deux types de valorisation dans le fichier ; un lot déjà présent dans l'usine cible n'est pas modifié (S si même type de valorisation, E sinon). P_TEST (défaut coché) : contrôles seuls, aucune création. Résultat en liste ALV, pas de log en base. |
 
 ## 6. Reprise, maintenance et points ouverts
 

@@ -104,9 +104,11 @@ In short, this is a controlled migration tool for moving unrestricted stock whil
 
 ### Companion programs
 
-- `ZPTP_SPLIT_VAL_MIG_UTILITY` builds the input file from SAP data.
-- `ZPTP_SPLIT_VAL_MIG_UPLOAD` copies a PC file to the application server, so that the migration can run as a background job.
-- `ZPTP_SPLIT_VAL_BATCH_COPY` reads an Excel file (material, batch, valuation type) and copies the batch data from the source plant to the target plant, adding the valuation type of the file.
+All four programs are reachable from the area menu `ZPTP_SVAL_MENU` (folder *Manage stock transfers 8P01->8Q01*): the migration directly, the three others under *Utilities*.
+
+- `ZPTP_SPLIT_VAL_MIG_UTILITY` (transaction `ZPTP_SPLIT_VAL_UTIL`) builds the input file from SAP data.
+- `ZPTP_SPLIT_VAL_MIG_UPLOAD` (transaction `ZPTP_SPLIT_VAL_UPLD`) copies a PC file to the application server, so that the migration can run as a background job.
+- `ZPTP_SPLIT_VAL_BATCH_COPY` (transaction `ZPTP_SPLIT_VAL_BCPY`) reads an Excel file (material, batch, valuation type) and copies the batch data from the source plant to the target plant, adding the valuation type of the file.
 
 ---
 

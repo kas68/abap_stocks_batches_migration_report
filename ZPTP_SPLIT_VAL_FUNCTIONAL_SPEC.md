@@ -279,9 +279,9 @@ Errors returned by the SAP BAPIs (batch creation, goods movement) are logged wit
 
 | Program | Purpose |
 | --- | --- |
-| ZPTP_SPLIT_VAL_MIG_UTILITY | Builds the CSV input file from SAP stock and the valuation types of the target plant. |
-| ZPTP_SPLIT_VAL_MIG_UPLOAD | Dialog only. Copies a file from the PC to the application server (binary copy, confirmation before overwriting), so that ZPTP_SPLIT_VAL_MIG can run as a background job with P_SRV. A background job cannot read a PC file. |
-| ZPTP_SPLIT_VAL_BATCH_COPY | Reads an Excel file (.xlsx: line 1 header; A material, B batch, C valuation type). For each line, reads the batch data at plant level in the source plant and creates the batch in the target plant with the same attributes and the valuation type of the file. Checks: columns filled, material extended and batch-managed in both plants, valuation type existing in the target plant, source batch existing, no batch with two valuation types in the file; an existing target batch is not changed (S if same valuation type, E otherwise). P_TEST (default on): checks only, no creation. Result in an ALV list, no database log. |
+| ZPTP_SPLIT_VAL_MIG_UTILITY (transaction ZPTP_SPLIT_VAL_UTIL) | Builds the CSV input file from SAP stock and the valuation types of the target plant. |
+| ZPTP_SPLIT_VAL_MIG_UPLOAD (transaction ZPTP_SPLIT_VAL_UPLD) | Dialog only. Copies a file from the PC to the application server (binary copy, confirmation before overwriting), so that ZPTP_SPLIT_VAL_MIG can run as a background job with P_SRV. A background job cannot read a PC file. |
+| ZPTP_SPLIT_VAL_BATCH_COPY (transaction ZPTP_SPLIT_VAL_BCPY) | Reads an Excel file (.xlsx: line 1 header; A material, B batch, C valuation type). For each line, reads the batch data at plant level in the source plant and creates the batch in the target plant with the same attributes and the valuation type of the file. Checks: columns filled, material extended and batch-managed in both plants, valuation type existing in the target plant, source batch existing, no batch with two valuation types in the file; an existing target batch is not changed (S if same valuation type, E otherwise). P_TEST (default on): checks only, no creation. Result in an ALV list, no database log. |
 
 ## 6. Restart, maintenance and open points
 

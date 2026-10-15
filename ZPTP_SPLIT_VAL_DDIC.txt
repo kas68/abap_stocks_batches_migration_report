@@ -195,4 +195,16 @@ DDIC STANDARDS TO APPLY WHEN CREATING THE OBJECTS (standard sec. 4.19)
   display-only maintenance is preferred.
 - Transaction code ZPTP_SPLIT_VAL_MIG (Z<WS_ID>_<name>), created in SE93 as a report
   transaction (program ZPTP_SPLIT_VAL_MIG, screen 1000). Add it to the roles (S_TCODE).
+- Transaction code ZPTP_SPLIT_VAL_BCPY, same type, program ZPTP_SPLIT_VAL_BATCH_COPY.
+- Transaction code ZPTP_SPLIT_VAL_UPLD, same type, program ZPTP_SPLIT_VAL_MIG_UPLOAD.
+- Transaction code ZPTP_SPLIT_VAL_UTIL, same type, program ZPTP_SPLIT_VAL_MIG_UTILITY.
+- Area menu ZPTP_SVAL_MENU (SE43, "Split Valuation project reservations and movements
+  management"), folder "Manage stock transfers 8P01->8Q01":
+    Stocks & batches migration   ZPTP_SPLIT_VAL_MIG
+    Utilities
+      Batch extension            ZPTP_SPLIT_VAL_BCPY
+      File upload                ZPTP_SPLIT_VAL_UPLD
+      Test file creation utility ZPTP_SPLIT_VAL_UTIL
+  The same menu also holds the reservation transactions of another development
+  (folder "Manage reservations": ZPTP_301_RES, ZPTP_301_TRF, ZPTP_301_MGR, ZPTP_301_LOG).
 ********************************************************************************

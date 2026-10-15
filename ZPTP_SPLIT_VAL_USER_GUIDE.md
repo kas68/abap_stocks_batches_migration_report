@@ -20,7 +20,7 @@ The report handles batch-managed and non-batch-managed materials. It does not mo
 | --- | --- |
 | Program | ZPTP_SPLIT_VAL_MIG (version 0.5) |
 | Screen title | STOCKS & BATCHES MIGRATION PROGRAM |
-| Start from | Transaction ZPTP_SPLIT_VAL_MIG (or SE38 / SA38) |
+| Start from | Area menu ZPTP_SVAL_MENU > Manage stock transfers 8P01->8Q01 > Stocks & batches migration (transaction ZPTP_SPLIT_VAL_MIG), or SE38 / SA38 |
 | Movement type | 301, one-step plant-to-plant transfer |
 | Default plants | 8P01 (source) to 8Q01 (target) |
 | Log tables | ZPTP_MOV_EXEC (movements), ZPTP_BATCH_EXT (batches) |
@@ -94,7 +94,7 @@ Any of the three filters also narrows the "SAP stock missing from the file" chec
 
 ### Running as a background job with a file from your PC
 
-A job cannot read a PC file (P_LOC). First run **ZPTP_SPLIT_VAL_MIG_UPLOAD** in dialog: pick the PC file, enter a path on the application server (for example in the DIR_HOME or a directory agreed with Basis), execute. Then schedule ZPTP_SPLIT_VAL_MIG with *Application server* (P_SRV) and the same path in P_FILE. Text symbol B01 of the upload report: *File copy*; selection texts: P_LFILE *File on the PC*, P_SFILE *Target path on the server*, P_OVR *Overwrite without asking*.
+A job cannot read a PC file (P_LOC). First run **ZPTP_SPLIT_VAL_MIG_UPLOAD** (transaction ZPTP_SPLIT_VAL_UPLD) in dialog: pick the PC file, enter a path on the application server (for example in the DIR_HOME or a directory agreed with Basis), execute. Then schedule ZPTP_SPLIT_VAL_MIG with *Application server* (P_SRV) and the same path in P_FILE. Text symbol B01 of the upload report: *File copy*; selection texts: P_LFILE *File on the PC*, P_SFILE *Target path on the server*, P_OVR *Overwrite without asking*.
 
 ### 3.1b Processing option (v0.7)
 
