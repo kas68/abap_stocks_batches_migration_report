@@ -24,7 +24,7 @@ logs every record in `ZPTP_MOV_EXEC` (batch extensions in `ZPTP_BATCH_EXT`).
 | *(SAP)* Area menu `ZPTP_SVAL_MENU` | Menu of the transactions `ZPTP_SPLIT_VAL_MIG`, `ZPTP_SPLIT_VAL_BCPY`, `ZPTP_SPLIT_VAL_UPLD`, `ZPTP_SPLIT_VAL_UTIL` (and of the reservation transactions of another development) |
 | `SAP ABAP Development Standard and Namimg Conventions.docx` | Sysmex D-Project ABAP Development Standards & Naming Conventions v1.2, which the object names follow |
 
-**Current version:** program v0.8. v0.8 adds the checkbox `P_ZBAT` (batches with zero stock),
+**Current version:** program v1.1. v1.1 adds a detailed log (one row per movement with its own document, a run-parameter row, and the QI stock left in inspection lots). v1.0 adds the transfer of blocked stock (343 / 301 / 344) and of quality-inspection stock without inspection lot (321 / 301 / 322), selected on the screen. v0.9 adds the stock scope of the quantity check (unrestricted / blocked / quality inspection, in combinations) and the option to deactivate that check. v0.8 adds the checkbox `P_ZBAT` (batches with zero stock),
 robust handling of units containing μ / ρ, UTF-8 decoding of a local input file, and a coloured,
 re-sorted ALV list. v0.7 added the processing option (1 split valuation materials / 2 non split
 valuation materials) and removed the outer screen frame (text symbol T01). v0.6 reads the receiving storage location of each item

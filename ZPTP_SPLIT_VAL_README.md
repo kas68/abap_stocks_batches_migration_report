@@ -1,4 +1,4 @@
-# ZPTP_SPLIT_VAL_MIG — HBM Split Valuation (program v0.8)
+# ZPTP_SPLIT_VAL_MIG — HBM Split Valuation (program v1.1)
 
 Inter-plant transfer (mvt 301) of **unrestricted** stock from source plant **8P01** to the
 new Split-Valuation plant **8Q01**. Both plants are defaults on the selection screen and stay
@@ -20,6 +20,50 @@ This repository holds the code only; version history is kept in git (the former
 - `HIGH_LEVEL_OVERVIEW.md` — non-technical overview of the program.
 - `SAP ABAP Development Standard and Namimg Conventions.docx` — the customer's development
   standards and naming conventions (Sysmex D-Project, v1.2).
+
+## What changed in v1.1 (detailed log)
+
+- `GTY_OUT-BWART` (new ALV column *Mvt type*): `F_ADD_LOG` writes it to `ZPTP_MOV_EXEC-BWART` (301 when blank).
+- `F_POST_CHAIN` returns one `GTY_STEP` per movement (343 / 321, 301, 344 / 322, reversal) with its own
+  status, document and message; `F_PROCESS_LINES` logs one row per movement and storage location.
+  Statuses: S posted, E failed, W last movement failed, T simulated (movement 1 only).
+- `F_LOG_RUN_PARAMS` (called at the end of `F_INIT`): one row per run, message 054, with option, transfer
+  mode, stock scope, quantity check on / off, FULL / DIRECT, P_ZBAT, reprocess.
+- `F_LOG_LOT_LEFT` (mode 3, from `F_READ_SAP_STOCK`): one row per material / batch / storage location
+  whose QI stock is partly held by open inspection lots, message 055, for the materials of the run.
+- Messages 054 and 055 to create in SE91. Anything counting `ZPTP_MOV_EXEC` rows per file line must
+  filter on `BWART = '301'`.
+
+## What changed in v1.0 (blocked and QI stock transfer)
+
+Block B7: `P_XUNR` (mode 1, 301 only, default), `P_XBLK` (mode 2: 343 / 301 / 344), `P_XQI` (mode 3:
+321 / 301 / 322, QI stock without inspection lot). `GV_XFER` holds the mode.
+- `F_READ_SAP_STOCK` / `F_MOVE_QTY`: the allocation pool (`GT_STOCK_LOC`) and `GT_STOCK-MFREE` hold the
+  stock of the mode (CLABS / CSPEM / CINSM, LABST / SPEME / INSME). Mode 3 subtracts the open
+  inspection-lot quantity per material / batch / storage location (`F_READ_QI_LOTS`: QALS, `INSMK` = X,
+  `LMENGEZUB` > 0). In modes 2 / 3 `GT_STOCK-MENGE` = the moved stock, block B6 is ignored.
+- `F_POST_CHAIN`: movement 1 (`F_POST_STOCK_TYPE`, source plant, issuing locations), commit, 301
+  (`F_POST_301`), commit, movement 3 (`F_POST_STOCK_TYPE`, target plant, mapped locations, target valuation
+  type), commit (`F_COMMIT`, synchronous). 301 failed → reversal of movement 1 (344 / 322 in the source
+  plant), status E. Movement 3 failed → status W, message with the manual action. Simulation: TESTRUN of
+  movement 1 only.
+- The post-commit update check of mode 1 is skipped in modes 2 / 3 (every document is committed in the
+  chain). `F_DELETE_RUN` now refuses a RUN_ID holding any real document (status S or W, MBLNR filled).
+- `F_VALIDATE_NO_BATCH` looks at all batch stock (CLABS / CSPEM / CINSM).
+- To verify in the sandbox: 343 / 344 / 321 / 322 with GM code 04 and only plant / storage location /
+  batch on the item; QALS fields `LMENGEZUB` (base unit?) and `LAGORTCHRG` (storage location); whether QM blocks a 321 when
+  the material is QM-managed; the valuation type on the 344 / 322 item in the split-valuated plant.
+- Text symbol `B07`, selection texts `P_XUNR`, `P_XBLK`, `P_XQI`.
+
+## What changed in v0.9 (stock scope)
+
+Block B6: radio buttons `P_ST1`..`P_ST5` (unrestricted / + blocked / + blocked + QI / blocked only /
+QI only) and checkbox `P_NOQTY`. `F_READ_SAP_STOCK` now reads CLABS / CSPEM / CINSM (MCHB) and LABST /
+SPEME / INSME (MARD); `F_SCOPE_QTY` returns the part in scope. `GT_STOCK-MENGE` holds the scope quantity
+(quantity check 3.5, reconciliation), `GT_STOCK-MFREE` the unrestricted part; `GT_STOCK_LOC` stays
+unrestricted per storage location (allocation and 301). The scope is a check scope: the 301 moves
+unrestricted stock only (005 if the file asks for more). `P_NOQTY` skips check 3.5. Option 2 uses
+`MFREE` as the quantity to move. Text symbol `B06` and the selection texts of the new fields to maintain.
 
 ## What changed in v0.8 (zero-stock batches)
 
@@ -174,6 +218,15 @@ leave *Dictionary Ref.* unticked, otherwise SAP replaces the text with the data 
 | Name | Text |
 |------|------|
 | P_ZBAT | Create batches with zero stock |
+| P_XUNR | 1 Unrestricted stock |
+| P_XBLK | 2 Blocked stock |
+| P_XQI | 3 QI stock without insp. lot |
+| P_ST1 | Unrestricted stock |
+| P_ST2 | Unrestricted + blocked stock |
+| P_ST3 | Unrestricted + blocked + QI stock |
+| P_ST4 | Blocked stock only |
+| P_ST5 | Quality inspection stock only |
+| P_NOQTY | Deactivate quantity check vs file |
 | P_SPLIT | Split Valuation Materials |
 | P_NONSPL | Non split valuation materials |
 | P_WSRC | Source plant (P_WSRC) |
@@ -196,7 +249,7 @@ leave *Dictionary Ref.* unticked, otherwise SAP replaces the text with the data 
 | P_CLR | Delete all logs before the run (P_CLR) |
 
 Text symbols: `B01`=Organizational data,
-`B05`=Processing option, `B02`=Input file, `B03`=Run control, `B04`=Maintenance.
+`B05`=Processing option, `B06`=Stock scope, `B07`=Stock type transferred, `B02`=Input file, `B03`=Run control, `B04`=Maintenance.
 
 Program attribute *Title* (SE38 → Attributes, shown in the window title bar):
 `STOCKS & BATCHES MIGRATION PROGRAM`.
@@ -475,6 +528,12 @@ keys as the ALV sort (`STATUS` with a separator line), so the rows are grouped b
 `MSGTY` and `NORMBAT`.
 
 ## Utility report (ZPTP_SPLIT_VAL_MIG_UTILITY)
+**v0.2:** block *Stock to extract* (`P_XUNR` / `P_XBLK` / `P_XQI`), same choice as the transfer mode of
+the migration: QUANTITY = unrestricted (CLABS / LABST), blocked (CSPEM / SPEME) or QI without inspection
+lot (CINSM / INSME minus QALS-LMENGEZUB of open stock-relevant lots, per storage location LAGORTCHRG). In
+modes 2 / 3 batches holding none of that stock are not listed. The default file name carries the stock
+type. Texts are set in INITIALIZATION (no text elements to maintain).
+
 Builds the CSV input file `MATNR;CHARG;BWTAR;QUANTITY;UOM` from SAP: unrestricted stock of plant 1
 (default 8P01, MCHB per batch, MARD for non-batch materials), valuation type of plant 2 (default
 8Q01, first MBEW type in ascending order). Test mode (default on) shows the ALV only; otherwise a

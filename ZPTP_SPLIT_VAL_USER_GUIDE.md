@@ -1,6 +1,6 @@
 # ZPTP_SPLIT_VAL_MIG — User Guide
 
-2026-10-06 · program v0.7
+2026-10-19 · program v1.1
 
 ## 1. What the report does
 
@@ -96,6 +96,26 @@ Any of the three filters also narrows the "SAP stock missing from the file" chec
 
 A job cannot read a PC file (P_LOC). First run **ZPTP_SPLIT_VAL_MIG_UPLOAD** (transaction ZPTP_SPLIT_VAL_UPLD) in dialog: pick the PC file, enter a path on the application server (for example in the DIR_HOME or a directory agreed with Basis), execute. Then schedule ZPTP_SPLIT_VAL_MIG with *Application server* (P_SRV) and the same path in P_FILE. Text symbol B01 of the upload report: *File copy*; selection texts: P_LFILE *File on the PC*, P_SFILE *Target path on the server*, P_OVR *Overwrite without asking*.
 
+### 3.1 Stock type transferred (v1.0)
+
+| Field | Default | What it does |
+| --- | --- | --- |
+| 1 Unrestricted stock (P_XUNR) | selected | One 301 per line, as before. |
+| 2 Blocked stock (P_XBLK) | — | 343 in the source plant, 301, 344 in the target plant: the stock arrives as blocked stock. |
+| 3 QI stock without inspection lot (P_XQI) | — | 321 in the source plant, 301, 322 in the target plant: the stock arrives in quality inspection. Stock held by an open inspection lot stays in the source plant. |
+
+In modes 2 and 3 each line gives three material documents, one per movement; each is logged on its own rows (column Mvt type: 343 / 321, 301, 344 / 322). If the 301 fails, the first movement is reversed automatically (status E). If the last movement fails, the line gets status **W**: the stock is unrestricted in the target plant, post the 344 (mode 2) or 322 (mode 3) yourself with MIGO for the quantities shown. A simulation checks only the first movement. The file quantities must match the blocked stock (mode 2) or the QI stock without inspection lot (mode 3).
+
+### 3.1a Stock scope (v0.9, mode 1 only)
+
+| Field | Default | What it does |
+| --- | --- | --- |
+| Unrestricted stock (P_ST1) | selected | The file quantity is compared with the unrestricted stock of the source plant. |
+| Unrestricted + blocked (P_ST2), + blocked + QI (P_ST3), Blocked only (P_ST4), QI only (P_ST5) | — | Changes which stock the file is compared with, and which stock the "SAP stock missing from the file" check looks at. |
+| Deactivate quantity check vs file (P_NOQTY) | unchecked | No file-versus-SAP quantity check (no message 004). The other checks stay active. |
+
+Important: the 301 only ever moves **unrestricted** stock. If the file quantity is larger than the unrestricted stock (for example because it includes blocked stock), the line is refused with message 005. The scope changes the check, not the stock moved.
+
 ### 3.1b Processing option (v0.7)
 
 | Field | Default | What it does |
@@ -108,8 +128,8 @@ A job cannot read a PC file (P_LOC). First run **ZPTP_SPLIT_VAL_MIG_UPLOAD** (tr
 
 | Field | Default | Required | What to enter |
 | --- | --- | --- | --- |
-| Application server (P_SRV) | selected | one of the two | File on the SAP application server. The only choice that works in a background job. |
-| Local file (P_LOC) | — | one of the two | File on your PC, uploaded through SAP GUI. Dialog runs only. |
+| Application server (P_SRV) | — | one of the two | File on the SAP application server. The only choice that works in a background job. |
+| Local file (P_LOC) | selected | one of the two | File on your PC, uploaded through SAP GUI. Dialog runs only: select Application server for a background job. |
 | Input file path (P_FILE) | blank | yes | Full path of the file. Press F4 to browse the server directory or your PC, depending on the choice above. The path is case-sensitive on the server. |
 | Field separator (P_SEP) | ; | yes | Column separator used in the file. |
 
@@ -282,7 +302,7 @@ Every blocked line carries a message of class ZPTP_SPLIT_VAL, or the message of 
 | --- | --- | --- | --- |
 | 002 | Z | Zero quantity, no movement | Nothing, unless the quantity is wrong. |
 | 003 | E | Valuation type missing in 8Q01 | Create the valuation segment for that type in 8Q01 (MM02, accounting view), or correct BWTAR in the file. |
-| 004 | E | File quantity differs from SAP stock | Compare File Qty, SAP Stock and Variance. Correct the file so that the total per material + batch equals the unrestricted stock in 8P01 (MMBE). Stock may have moved since the extract. |
+| 004 | E | File quantity differs from SAP stock (of the selected stock scope; can be deactivated with P_NOQTY) | Compare File Qty, SAP Stock and Variance. Correct the file so that the total per material + batch equals the unrestricted stock in 8P01 (MMBE). Stock may have moved since the extract. |
 | 005 | E | Not enough stock left in the issuing storage locations | Other lines of the same material/batch used the stock first. Check the quantities per valuation type in the file. |
 | 006 | E | No unrestricted stock in 8P01 | Check MMBE: stock may be blocked, in QI, or already moved. A blank batch on a batch-managed material also gives 006: fill the batch. |
 | 007 | E | Quantity not numeric | Correct the quantity (no thousands separator, no text). |
@@ -303,6 +323,8 @@ Every blocked line carries a message of class ZPTP_SPLIT_VAL, or the message of 
 | 023 | E | Mapped target storage location missing in 8Q01 | Correct the target storage location in ZPTP_SLOC_MAP, or create it in 8Q01 (OX09, MM customizing team). |
 | 025 | E | Option 2: material split-valuated in 8Q01 | Include the material in the input file with its valuation type and run option 1, or correct the material master. |
 | 026 | E | Option 2: batch management differs between 8P01 and 8Q01 | Align the batch management indicator in both plants, then reprocess. |
+| 054 | W | Run parameters (first row of every run) | Nothing: it records the options used (transfer mode, stock checked, quantity check on or off). |
+| 055 | W | Mode 3: QI stock held by open inspection lots stays in 8P01 | Nothing, unless that stock must move too: close the inspection lots (usage decision, QA11) and run again. |
 | 024 | E | No entry in ZPTP_SLOC_MAP for the issuing storage location (shown in Src SLoc) | Add the entry 8P01 / storage location / 8Q01 / target storage location with SM30, then reprocess. |
 | other | E | Message from BAPI_GOODSMVT_CREATE or BAPI_BATCH_CREATE (for example M7, 12) | Read Msg Class and Msg No in SE91; typical causes are a closed period, a locked material or a missing authorization. |
 

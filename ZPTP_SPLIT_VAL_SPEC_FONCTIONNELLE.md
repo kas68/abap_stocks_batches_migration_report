@@ -1,6 +1,6 @@
 # ZPTP_SPLIT_VAL_MIG — Spécification fonctionnelle et guide d'utilisation
 
-02/10/2026 · programme v0.6 (aligné sur le source)
+19/10/2026 · programme v1.1 (aligné sur le source)
 
 ## 1. Objet et périmètre
 
@@ -97,7 +97,7 @@ En simulation (P_TEST coché, valeur par défaut), le programme exécute tous le
 
 ## 3. Écran de sélection
 
-L'écran regroupe 21 paramètres en cinq blocs (le bloc « Processing option » a été ajouté en v0.7 ; le cadre extérieur titré STOCKS & BATCHES MIGRATION PROGRAM a été supprimé). Chaque paramètre est libellé *libellé (nom technique)*, par exemple *Source plant (P_WSRC)* ; les libellés de l'écran sont en anglais. Les contrôles de cohérence ne s'exécutent qu'au lancement (F8, job d'arrière-plan, impression), pas à chaque changement de sélection. Quand l'option de suppression P_DEL est cochée, seul le RUN_ID est contrôlé.
+L'écran regroupe 30 paramètres en sept blocs (le bloc « Processing option » a été ajouté en v0.7 ; le cadre extérieur titré STOCKS & BATCHES MIGRATION PROGRAM a été supprimé). Chaque paramètre est libellé *libellé (nom technique)*, par exemple *Source plant (P_WSRC)* ; les libellés de l'écran sont en anglais. Les contrôles de cohérence ne s'exécutent qu'au lancement (F8, job d'arrière-plan, impression), pas à chaque changement de sélection. Quand l'option de suppression P_DEL est cochée, seul le RUN_ID est contrôlé.
 
 ### 3.0 Bloc « Processing option » (v0.7, P_ZBAT v0.8)
 
@@ -106,6 +106,35 @@ L'écran regroupe 21 paramètres en cinq blocs (le bloc « Processing option » 
 | P_SPLIT | Split Valuation Materials | coché | Option 1 : comportement inchangé. Les articles du fichier d'entrée qui ont du stock dans l'usine émettrice sont transférés. |
 | P_NONSPL | Non split valuation materials | — | Option 2 : tous les articles ayant du stock libre dans l'usine émettrice qui ne sont **pas** dans le fichier sont transférés avec la totalité de leur stock libre. Le lot est créé dans l'usine cible s'il manque (articles gérés par lot), puis le 301 est posté. Le fichier sert uniquement à connaître les articles à exclure (un article est exclu dès qu'une ligne du fichier le porte, même rejetée). Contrôles : article étendu à l'usine cible (014), même gestion par lot dans les deux usines (026), article **non** valorisé séparément dans l'usine cible (025). Aucun type de valorisation n'est lu ni posté. P_FULL / P_DIR sont ignorés. Simulation, RUN_ID / reprise, mapping des magasins et log fonctionnent comme pour l'option 1 ; les filtres S_MATNR, S_CHARG et S_MTART s'appliquent à la lecture du stock. |
 | P_ZBAT | Create batches with zero stock | décoché | Les deux options. Le lot est créé dans l'usine cible s'il manque, bien que le stock libre de l'usine émettrice soit 0 ; **aucun mouvement** n'est posté. Option 1 : lignes du fichier à quantité 0 avec un lot (mode Full : le type de valorisation doit exister dans l'usine cible, 003). Option 2 : lots de l'usine émettrice (non marqués à supprimer) sans stock libre, pour les articles absents du fichier. Articles gérés par lot uniquement. Statut S (T en simulation). Décoché : une ligne à zéro reste en statut Z et aucun lot n'est créé. |
+
+### 3.0a Bloc « Stock type transferred » (v1.0)
+
+| Paramètre | Libellé | Défaut | Signification et fonctionnement |
+| --- | --- | --- | --- |
+| P_XUNR | 1 Unrestricted stock | coché | Comportement inchangé : un mouvement 301 par ligne du fichier. |
+| P_XBLK | 2 Blocked stock | — | Le stock bloqué est transféré en trois mouvements : **343** dans l'usine source (bloqué → libre), **301** avec le type de valorisation du fichier, **344** dans l'usine cible (libre → bloqué). |
+| P_XQI | 3 QI stock without inspection lot | — | Le stock en contrôle qualité est transféré en trois mouvements : **321** dans l'usine source (qualité → libre), **301**, **322** dans l'usine cible (libre → qualité). Seule la quantité qui n'appartient pas à un lot de contrôle ouvert (QALS-LMENGEZUB) est transférée ; le stock des lots de contrôle reste dans l'usine source. |
+
+Modes 2 et 3 :
+- Un document article par mouvement, validé avant le mouvement suivant, car chaque mouvement a besoin du stock laissé par le précédent. Les postes 343 / 321 et 344 / 322 utilisent les mêmes magasins que le 301 (magasins émetteurs dans l'usine source, magasins de ZPTP_SLOC_MAP dans l'usine cible) ; le poste 344 / 322 porte le type de valorisation cible.
+- Échec du 301 : le premier mouvement est annulé dans l'usine source (344 / 322) et la ligne finit en statut E ; le message donne les deux documents. Si l'annulation échoue aussi, le message le dit et indique le mouvement à passer à la main.
+- Échec du dernier mouvement : statut **W**. Le 343 / 321 et le 301 sont passés, le stock est libre dans l'usine cible, et le message indique le mouvement à passer à la main. Une ligne W n'est pas retraitée par P_REPRC.
+- Simulation : seul le premier mouvement est contrôlé par le BAPI (TESTRUN). Le 301 et le dernier mouvement ne sont contrôlés qu'au moment de la comptabilisation, car ils ont besoin du stock déplacé par le premier.
+- La quantité du fichier est comparée au stock transféré (stock bloqué ; stock qualité hors lot de contrôle) ; le bloc « Stock scope » est ignoré. P_NOQTY désactive toujours le contrôle.
+- Les deux options utilisent le mode. Un run qui contient un document réel (statut S ou W) ne peut pas être supprimé avec P_DEL.
+
+### 3.0b Bloc « Stock scope » (v0.9, mode 1 uniquement depuis la v1.0)
+
+| Paramètre | Libellé | Défaut | Signification et fonctionnement |
+| --- | --- | --- | --- |
+| P_ST1 | Unrestricted stock | coché | Stock comparé au fichier et utilisé pour le rapprochement « stock SAP absent du fichier » : stock libre seul. |
+| P_ST2 | Unrestricted + blocked stock | — | Stock libre plus stock bloqué (CSPEM / SPEME). |
+| P_ST3 | Unrestricted + blocked + QI stock | — | Plus le stock en contrôle qualité (CINSM / INSME). |
+| P_ST4 | Blocked stock only | — | Stock bloqué seul. |
+| P_ST5 | Quality inspection stock only | — | Stock en contrôle qualité seul. |
+| P_NOQTY | Deactivate quantity check vs file | décoché | Saute le contrôle de quantité fichier / SAP (étape 3.5, message 004) ; l'écart n'est pas calculé. Les autres contrôles, la répartition (005) et le rapprochement restent actifs. |
+
+Le périmètre est un **périmètre de contrôle**. Le mouvement 301 déplace toujours le **stock libre seul** : une quantité du fichier supérieure au stock libre est bloquée par le contrôle de répartition (005), quel que soit le périmètre. En option 2, le périmètre choisit les lots considérés et la quantité déplacée est la part libre (un lot dont le stock n'est que bloqué ou en qualité est logué en statut Z, sans mouvement). Le périmètre s'applique aux deux options ; P_NOQTY est sans effet sur l'option 2 (pas de quantité fichier).
 
 ### 3.1 Bloc « Organizational data »
 
@@ -124,8 +153,8 @@ Avec l'un des trois filtres S_MATNR, S_CHARG ou S_MTART, le rapprochement « sto
 
 | Paramètre | Libellé | Obligatoire | Défaut | Signification et fonctionnement |
 | --- | --- | --- | --- | --- |
-| P_SRV | Application server | choix exclusif | coché | Le fichier est lu sur le serveur d'application. Seul choix possible en arrière-plan. |
-| P_LOC | Local file | choix exclusif | — | Le fichier est chargé depuis le poste de travail (GUI). Nécessite une exécution en dialogue. |
+| P_SRV | Application server | choix exclusif | — | Le fichier est lu sur le serveur d'application. Seul choix possible en arrière-plan. |
+| P_LOC | Local file | choix exclusif | coché (v1.1) | Le fichier est chargé depuis le poste de travail (GUI). Nécessite une exécution en dialogue. |
 | P_FILE | Input file path | oui | vide | Chemin complet du fichier. L'aide F4 ouvre l'explorateur du serveur ou du poste selon le choix ci-dessus. Le programme vérifie que le fichier existe et est lisible avant de démarrer. |
 | P_SEP | Field separator | oui | ; | Caractère séparateur des colonnes du fichier. |
 
@@ -236,6 +265,8 @@ Le magasin émetteur est celui où se trouve actuellement le stock ; le magasin 
 
 Depuis la v0.8, les lignes sont groupées par statut (T, S, E, W, Z, I, X) avec une ligne de séparation entre deux statuts, puis triées par message (classe et numéro), article, lot et magasin émetteur. Les lignes sont colorées selon le type de message : rouge pour E, A et I, jaune pour W, vert pour une ligne simulée ou postée (T, S). La couleur du texte dépend du thème du SAP GUI.
 
+**Log détaillé (v1.1).** En modes de transfert 2 et 3, chaque mouvement a ses propres lignes : colonne *Mvt type* (BWART) = 343 / 321, 301, 344 / 322, chacune avec son document article ; une annulation après un 301 en échec est loguée comme une ligne 344 / 322. Chaque run commence par une ligne de paramètres (054). En mode 3, le stock qualité laissé dans l'usine source à cause de lots de contrôle ouverts est logué par article / lot / magasin (055). Pour compter une ligne par ligne du fichier, filtrer sur Mvt type = 301.
+
 ### 5.3 Tables de log
 
 | Table | Contenu | Clé |
@@ -273,6 +304,8 @@ Chaque document article est validé dans la même unité de traitement que ses l
 | 024 | Pas de correspondance dans ZPTP_SLOC_MAP pour le magasin émetteur | E |
 | 025 | Article valorisé séparément dans l'usine cible, non éligible à l'option 2 | E |
 | 026 | Gestion par lot différente entre les deux usines (option 2) | E |
+| 054 | Paramètres du run (option, mode de transfert, stock contrôlé, contrôle de quantité actif ou non, mode, lots à stock zéro), une ligne par run | W |
+| 055 | Mode 3 : stock qualité tenu par des lots de contrôle ouverts, laissé dans l'usine source (quantité par article / lot / magasin) | W |
 
 Les erreurs renvoyées par les BAPI SAP (création de lot, mouvement) sont reprises avec leur propre classe et numéro de message.
 
@@ -280,7 +313,7 @@ Les erreurs renvoyées par les BAPI SAP (création de lot, mouvement) sont repri
 
 | Programme | Rôle |
 | --- | --- |
-| ZPTP_SPLIT_VAL_MIG_UTILITY (transaction ZPTP_SPLIT_VAL_UTIL) | Construit le fichier CSV d'entrée à partir du stock SAP et des types de valorisation de l'usine cible. |
+| ZPTP_SPLIT_VAL_MIG_UTILITY (transaction ZPTP_SPLIT_VAL_UTIL) | Construit le fichier CSV d'entrée à partir du stock SAP et des types de valorisation de l'usine cible. Le stock extrait se choisit comme le mode de transfert de la migration (v0.2) : libre (défaut), bloqué, ou qualité hors lot de contrôle (lots de contrôle ouverts déduits par magasin). Le lancer avec le même choix que la migration pour que le fichier passe le contrôle de quantité. |
 | ZPTP_SPLIT_VAL_MIG_UPLOAD (transaction ZPTP_SPLIT_VAL_UPLD) | Dialogue uniquement. Copie un fichier du PC vers le serveur d'application (copie binaire, confirmation avant écrasement), pour que ZPTP_SPLIT_VAL_MIG puisse tourner en arrière-plan avec P_SRV. Un job ne peut pas lire un fichier du PC. |
 | ZPTP_SPLIT_VAL_BATCH_COPY (transaction ZPTP_SPLIT_VAL_BCPY) | Lit un fichier Excel (.xlsx : ligne 1 en-tête ; A article, B lot, C type de valorisation). Pour chaque ligne, lit les données du lot au niveau usine dans l'usine émettrice et crée le lot dans l'usine cible avec les mêmes attributs et le type de valorisation du fichier. Contrôles : colonnes renseignées, article étendu et géré par lot dans les deux usines, type de valorisation existant dans l'usine cible, lot source existant, pas de lot avec deux types de valorisation dans le fichier ; un lot déjà présent dans l'usine cible n'est pas modifié (S si même type de valorisation, E sinon). P_TEST (défaut coché) : contrôles seuls, aucune création. Résultat en liste ALV, pas de log en base. |
 

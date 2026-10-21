@@ -1,6 +1,6 @@
 # ZPTP_SPLIT_VAL_MIG — Functional Specification and User Guide
 
-2026-10-02 · program v0.7 (aligned on the source)
+2026-10-19 · program v1.1 (aligned on the source)
 
 ## 1. Purpose and scope
 
@@ -97,7 +97,7 @@ In simulation (P_TEST checked, the default), the program runs every check and ca
 
 ## 3. Selection screen
 
-The screen has 21 parameters in five blocks (the "Processing option" block was added in v0.7; the outer frame titled STOCKS & BATCHES MIGRATION PROGRAM was removed). Each parameter is labelled *label (technical name)*, for example *Source plant (P_WSRC)*. Consistency checks run only on execution (F8, background job, print), not on every change on the screen. When the deletion option P_DEL is checked, only the RUN_ID is checked.
+The screen has 30 parameters in seven blocks (the "Processing option" block was added in v0.7; the outer frame titled STOCKS & BATCHES MIGRATION PROGRAM was removed). Each parameter is labelled *label (technical name)*, for example *Source plant (P_WSRC)*. Consistency checks run only on execution (F8, background job, print), not on every change on the screen. When the deletion option P_DEL is checked, only the RUN_ID is checked.
 
 ### 3.0 Block "Processing option" (v0.7, P_ZBAT v0.8)
 
@@ -107,6 +107,35 @@ The screen has 21 parameters in five blocks (the "Processing option" block was a
 | P_NONSPL | Non split valuation materials | — | Option 2: every material with unrestricted stock in the source plant that is **not** in the input file is transferred with its whole unrestricted stock. The batch is created in the target plant when missing (batch-managed materials), then the 301 is posted. The file is read only to know which materials to exclude (a material is excluded as soon as one line of the file carries it, even a rejected line). Checks: material extended to the target plant (014), same batch management in both plants (026), material **not** split-valuated in the target plant (025). No valuation type is read or posted. P_FULL / P_DIR are ignored (these checks always run). Simulation, RUN_ID / reprocess, storage-location mapping and logging work as for option 1; the filters S_MATNR, S_CHARG and S_MTART apply to the stock read. |
 
 | P_ZBAT | Create batches with zero stock | unchecked | Both options. The batch is created in the target plant when missing, although the unrestricted stock in the source plant is 0; **no movement** is posted. Option 1: file lines with quantity 0 and a batch (Full mode: the valuation type must exist in the target plant, 003). Option 2: batches of the source plant (not flagged for deletion) with no unrestricted stock, for materials not in the file. Only batch-managed materials. Log status S (T in simulation). Unchecked: a zero line keeps status Z and no batch is created. |
+
+### 3.0a Block "Stock type transferred" (v1.0)
+
+| Parameter | Label | Default | Meaning and behaviour |
+| --- | --- | --- | --- |
+| P_XUNR | 1 Unrestricted stock | checked | Unchanged behaviour: one 301 movement per file line. |
+| P_XBLK | 2 Blocked stock | — | Blocked stock is moved in three movements: **343** in the source plant (blocked → unrestricted), **301** with the valuation type of the file, **344** in the target plant (unrestricted → blocked). |
+| P_XQI | 3 QI stock without inspection lot | — | Quality inspection stock is moved in three movements: **321** in the source plant (QI → unrestricted), **301**, **322** in the target plant (unrestricted → QI). Only the QI quantity not held by an open stock-relevant inspection lot (QALS-LMENGEZUB) is moved; the lot stock stays in the source plant. |
+
+Modes 2 and 3:
+- One material document per movement, committed before the next movement, since each movement needs the stock left by the previous one. The 343 / 321 and 344 / 322 items use the same storage locations as the 301 (issuing locations in the source plant, ZPTP_SLOC_MAP locations in the target plant); the 344 / 322 item carries the target valuation type.
+- The 301 fails: the first movement is reversed in the source plant (344 / 322) and the line ends with status E; the message gives both documents. If the reversal also fails, the message says so and which movement to post manually.
+- The last movement fails: status **W**. The 343 / 321 and 301 are posted, the stock is unrestricted in the target plant, and the message says which movement to post manually. A W line is not reprocessed by P_REPRC.
+- Simulation: only the first movement is checked by the BAPI (TESTRUN). The 301 and the last movement are checked at posting only, because they need the stock moved by the first one.
+- The file quantity is compared with the stock being moved (blocked stock; QI stock without inspection lot); block "Stock scope" is ignored. P_NOQTY still deactivates the check.
+- Both options use the mode. A run holding any real document (status S or W) cannot be deleted with P_DEL.
+
+### 3.0b Block "Stock scope" (v0.9, mode 1 only from v1.0)
+
+| Parameter | Label | Default | Meaning and behaviour |
+| --- | --- | --- | --- |
+| P_ST1 | Unrestricted stock | checked | Stock compared with the file and used for the "SAP stock not in file" reconciliation: unrestricted only. |
+| P_ST2 | Unrestricted + blocked stock | — | Unrestricted plus blocked stock (CSPEM / SPEME). |
+| P_ST3 | Unrestricted + blocked + QI stock | — | Plus quality inspection stock (CINSM / INSME). |
+| P_ST4 | Blocked stock only | — | Blocked stock only. |
+| P_ST5 | Quality inspection stock only | — | Quality inspection stock only. |
+| P_NOQTY | Deactivate quantity check vs file | unchecked | Skips the file-versus-SAP quantity check (step 3.5, message 004); the variance is not computed. The other checks, the allocation (005) and the reconciliation stay active. |
+
+The scope is a **check scope**. The 301 movement still moves **unrestricted stock only**: a file quantity above the unrestricted stock is blocked by the allocation check (005), whatever the scope. In option 2 the scope selects the batches considered, and the quantity moved is the unrestricted part (a batch with stock only in blocked or QI is logged with status Z, no movement). The scope applies to both options; P_NOQTY has no effect on option 2 (no file quantity).
 
 ### 3.1 Block "Organizational data"
 
@@ -125,8 +154,8 @@ With any of the three filters S_MATNR, S_CHARG or S_MTART, the "SAP stock missin
 
 | Parameter | Label | Mandatory | Default | Meaning and behaviour |
 | --- | --- | --- | --- | --- |
-| P_SRV | Application server | exclusive choice | checked | The file is read on the application server. The only possible choice in background. |
-| P_LOC | Local file | exclusive choice | — | The file is uploaded from the workstation (GUI). Requires a dialog run. |
+| P_SRV | Application server | exclusive choice | — | The file is read on the application server. The only possible choice in background. |
+| P_LOC | Local file | exclusive choice | checked (v1.1) | The file is uploaded from the workstation (GUI). Requires a dialog run: for a background job, select P_SRV. |
 | P_FILE | Input file path | yes | blank | Full path of the file. F4 help opens the server or workstation file browser, depending on the choice above. The program checks that the file exists and is readable before starting. |
 | P_SEP | Field separator | yes | ; | Column separator character of the file. |
 
@@ -215,6 +244,8 @@ In Full Validation mode, the sum of the file quantities for a given material + b
 
 At the end of the run, the program displays an ALV list with one row per processed line and per issuing storage location. The same rows are logged in table ZPTP_MOV_EXEC.
 
+**Detailed log (v1.1).** In transfer modes 2 and 3 each movement gets its own rows: column *Mvt type* (BWART) = 343 / 321, 301, 344 / 322, each with its own material document; a reversal after a failed 301 is logged as a 344 / 322 row. Every run starts with one run-parameter row (054). In mode 3, the QI stock left in the source plant because of open inspection lots is logged per material / batch / storage location (055). To count one row per file line, filter on Mvt type = 301.
+
 ### 5.1 Statuses
 
 | Status | Meaning | Movement posted |
@@ -272,6 +303,8 @@ Each material document is committed in the same logical unit of work as its log 
 | 024 | No storage location mapping in ZPTP_SLOC_MAP for the issuing storage location | E |
 | 025 | Material split-valuated in the target plant, not eligible for option 2 | E |
 | 026 | Batch management differs between the two plants (option 2) | E |
+| 054 | Run parameters (option, transfer mode, stock checked, quantity check on/off, mode, zero-stock batches), one row per run | W |
+| 055 | Mode 3: QI stock held by open inspection lots stays in the source plant (quantity per material / batch / storage location) | W |
 
 Errors returned by the SAP BAPIs (batch creation, goods movement) are logged with their own message class and number.
 
@@ -279,7 +312,7 @@ Errors returned by the SAP BAPIs (batch creation, goods movement) are logged wit
 
 | Program | Purpose |
 | --- | --- |
-| ZPTP_SPLIT_VAL_MIG_UTILITY (transaction ZPTP_SPLIT_VAL_UTIL) | Builds the CSV input file from SAP stock and the valuation types of the target plant. |
+| ZPTP_SPLIT_VAL_MIG_UTILITY (transaction ZPTP_SPLIT_VAL_UTIL) | Builds the CSV input file from SAP stock and the valuation types of the target plant. The stock extracted is chosen like the transfer mode of the migration (v0.2): unrestricted (default), blocked, or QI without inspection lot (open stock-relevant inspection lots deducted per storage location). Run it with the same choice as the migration so the file passes the quantity check. |
 | ZPTP_SPLIT_VAL_MIG_UPLOAD (transaction ZPTP_SPLIT_VAL_UPLD) | Dialog only. Copies a file from the PC to the application server (binary copy, confirmation before overwriting), so that ZPTP_SPLIT_VAL_MIG can run as a background job with P_SRV. A background job cannot read a PC file. |
 | ZPTP_SPLIT_VAL_BATCH_COPY (transaction ZPTP_SPLIT_VAL_BCPY) | Reads an Excel file (.xlsx: line 1 header; A material, B batch, C valuation type). For each line, reads the batch data at plant level in the source plant and creates the batch in the target plant with the same attributes and the valuation type of the file. Checks: columns filled, material extended and batch-managed in both plants, valuation type existing in the target plant, source batch existing, no batch with two valuation types in the file; an existing target batch is not changed (S if same valuation type, E otherwise). P_TEST (default on): checks only, no creation. Result in an ALV list, no database log. |
 

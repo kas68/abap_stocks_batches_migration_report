@@ -175,6 +175,9 @@ MESSAGE CLASS  ZPTP_SPLIT_VAL  (SE91) - used by the program
      eligible for the non split valuation option                    [v0.7]
 026  Material &1: batch management differs between plant &2 and
      plant &3                                                       [v0.7]
+054  Run parameters: &1 &2 &3 &4                                    [v1.1]
+055  &1 &2 of QI stock held by inspection lots stays in plant &3 -
+     not moved                                                      [v1.1]
 (The program passes MSGID/MSGNO together with a free text in MSGTX; the entries
  above are required so MSGID/MSGNO resolve to a text when the log is reported on.
  009 is also used when the material number cannot be converted (MATN1).

@@ -3,7 +3,7 @@
 *&---------------------------------------------------------------------*
 *& Project : HBM - Split Valuation migration
 *& Scope   : Preparation of the Valuation Type Input File
-*& Version : v0.1
+*& Version : v0.2
 *& Package : ZPTP_SPLIT_VAL
 *&
 *&---------------------------------------------------------------------*
@@ -37,6 +37,14 @@
 *&   - Zero-quantity lines are left out unless P_ZERO is set.
 *&   - Test mode (P_TEST, default on): only the ALV is produced, no
 *&     file is built and no save dialog is opened.
+*&   - Stock extracted (v0.2), same choice as the transfer mode of
+*&     ZPTP_SPLIT_VAL_MIG, so that the file passes its quantity check:
+*&       P_XUNR unrestricted (MCHB-CLABS / MARD-LABST, default),
+*&       P_XBLK blocked (CSPEM / SPEME),
+*&       P_XQI  quality inspection without inspection lot (CINSM / INSME
+*&              minus the open, stock-relevant inspection lots, QALS-
+*&              LMENGEZUB, per material / batch / storage location).
+*&     QUANTITY is then that stock instead of the unrestricted stock.
 *&
 *&---------------------------------------------------------------------*
 *& Assumptions
@@ -94,6 +102,8 @@ TYPES: BEGIN OF gty_stock,
          matnr TYPE matnr,
          charg TYPE charg_d,
          menge TYPE p LENGTH 13 DECIMALS 3,
+         qitot TYPE p LENGTH 13 DECIMALS 3,   " QI mode: total QI stock      [v0.2]
+         qilot TYPE p LENGTH 13 DECIMALS 3,   " QI mode: part in inspection lots
        END OF gty_stock,
        gtt_stock TYPE STANDARD TABLE OF gty_stock WITH DEFAULT KEY.
 
@@ -106,6 +116,9 @@ TYPES: BEGIN OF gty_out,
          bwtar  TYPE bwtar_d,
          menge  TYPE p LENGTH 13 DECIMALS 3,
          meins  TYPE meins,
+         stktyp TYPE c LENGTH 30,       " stock type the quantity comes from [v0.2]
+         qitot  TYPE p LENGTH 13 DECIMALS 3,  " QI mode: total QI stock       [v0.2]
+         qilot  TYPE p LENGTH 13 DECIMALS 3,  " QI mode: in inspection lots (stays)
          infile TYPE abap_bool,
          newbat TYPE abap_bool,
          msg    TYPE c LENGTH 100,
@@ -137,6 +150,13 @@ SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE gv_tit1.
                   s_charg FOR gv_sel_charg.
 SELECTION-SCREEN END OF BLOCK b1.
 
+* stock extracted, as the transfer mode of ZPTP_SPLIT_VAL_MIG   [v0.2]
+SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE gv_tit3.
+  PARAMETERS: p_xunr RADIOBUTTON GROUP xfr DEFAULT 'X',          " unrestricted
+              p_xblk RADIOBUTTON GROUP xfr,                      " blocked
+              p_xqi  RADIOBUTTON GROUP xfr.                      " QI without inspection lot
+SELECTION-SCREEN END OF BLOCK b3.
+
 SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE gv_tit2.
   PARAMETERS: p_zero TYPE abap_bool AS CHECKBOX,                " include zero-quantity lines
               p_incl TYPE abap_bool AS CHECKBOX,                " ALV: only rows included in the file
@@ -150,6 +170,10 @@ INITIALIZATION.
 * texts set here so that no text-element maintenance is needed
   gv_tit1 = 'Selection'.
   gv_tit2 = 'Options'.
+  gv_tit3 = 'Stock to extract'.
+  %_p_xunr_%_app_%-text   = '1 Unrestricted stock'.
+  %_p_xblk_%_app_%-text   = '2 Blocked stock'.
+  %_p_xqi_%_app_%-text    = '3 QI stock without insp. lot'.
   %_p_werks1_%_app_%-text = 'Plant 1 (stock)'.
   %_p_werks2_%_app_%-text = 'Plant 2 (valuation types)'.
   %_s_matnr_%_app_%-text  = 'Material'.
@@ -253,33 +277,111 @@ ENDFORM.
 
 *&---------------------------------------------------------------------*
 *&      Form  F_READ_STOCK
-*&      Unrestricted stock of plant 1, summed over storage locations.
+*&      Stock of plant 1 selected on the screen (unrestricted, blocked,
+*&      or QI without inspection lot), summed over storage locations.
 *&---------------------------------------------------------------------*
 FORM f_read_stock.
+
+  TYPES: BEGIN OF lty_lot,
+           matnr TYPE matnr,
+           charg TYPE charg_d,
+           lgort TYPE lgort_d,
+           menge TYPE p LENGTH 13 DECIMALS 3,
+         END OF lty_lot.
+  DATA: lt_lot TYPE SORTED TABLE OF lty_lot WITH UNIQUE KEY matnr charg lgort,
+        ls_lot TYPE lty_lot,
+        ls_stk TYPE gty_stock.
+
   CLEAR gt_stock.
 
-  SELECT matnr, charg, SUM( clabs ) AS menge
+* QI mode: QI stock held by open, stock-relevant inspection lots
+  IF p_xqi = abap_true.
+    SELECT matnr, charg, lagortchrg, lmengezub
+      FROM qals
+      WHERE werk      =  @p_werks1
+        AND matnr     IN @s_matnr
+        AND insmk     =  @abap_true
+        AND lmengezub >  0
+      INTO TABLE @DATA(lt_qals).
+    LOOP AT lt_qals INTO DATA(ls_qals).
+      ls_lot = VALUE #( matnr = ls_qals-matnr charg = ls_qals-charg
+                        lgort = ls_qals-lagortchrg menge = ls_qals-lmengezub ).
+      COLLECT ls_lot INTO lt_lot.
+    ENDLOOP.
+  ENDIF.
+
+* --- batch-managed materials: MCHB per storage location ------------
+  SELECT matnr, charg, lgort, clabs, cspem, cinsm
     FROM mchb
     WHERE werks = @p_werks1
       AND matnr IN @s_matnr
       AND charg IN @s_charg
-    GROUP BY matnr, charg
-    INTO CORRESPONDING FIELDS OF TABLE @gt_stock.
+    INTO TABLE @DATA(lt_mchb).
+
+  LOOP AT lt_mchb INTO DATA(ls_mchb).
+    CLEAR ls_stk.
+    ls_stk-matnr = ls_mchb-matnr.
+    ls_stk-charg = ls_mchb-charg.
+    IF p_xblk = abap_true.
+      ls_stk-menge = ls_mchb-cspem.
+    ELSEIF p_xqi = abap_true.
+      ls_stk-menge = ls_mchb-cinsm.
+      READ TABLE lt_lot INTO ls_lot
+           WITH TABLE KEY matnr = ls_mchb-matnr charg = ls_mchb-charg lgort = ls_mchb-lgort.
+      IF sy-subrc = 0.
+        ls_stk-menge = ls_stk-menge - ls_lot-menge.
+      ENDIF.
+      IF ls_stk-menge < 0.
+        ls_stk-menge = 0.
+      ENDIF.
+*     split of the QI stock: without lot (extracted) / in inspection lots
+      ls_stk-qitot = ls_mchb-cinsm.
+      ls_stk-qilot = ls_mchb-cinsm - ls_stk-menge.
+    ELSE.
+      ls_stk-menge = ls_mchb-clabs.
+    ENDIF.
+*   modes 2 / 3: a batch holding none of that stock type is not listed
+*   (QI mode: listed as soon as it holds QI stock, even all in lots)
+    IF p_xunr = abap_false AND ls_stk-menge = 0 AND ls_stk-qitot = 0.
+      CONTINUE.
+    ENDIF.
+    COLLECT ls_stk INTO gt_stock.
+  ENDLOOP.
 
 * non-batch-managed materials carry a blank batch: they can only match
 * a batch selection that admits a blank
   IF space IN s_charg.
-    SELECT matnr, SUM( labst ) AS menge
+    SELECT matnr, lgort, labst, speme, insme
       FROM mard
       WHERE werks = @p_werks1
         AND matnr IN @s_matnr
-      GROUP BY matnr
       INTO TABLE @DATA(lt_mard).
     LOOP AT lt_mard INTO DATA(ls_mard).
       READ TABLE gt_mat1 INTO DATA(ls_mat) WITH TABLE KEY matnr = ls_mard-matnr.
-      IF sy-subrc = 0 AND ls_mat-batchmgd = abap_false.
-        APPEND VALUE #( matnr = ls_mard-matnr menge = ls_mard-menge ) TO gt_stock.
+      CHECK sy-subrc = 0 AND ls_mat-batchmgd = abap_false.
+      CLEAR ls_stk.
+      ls_stk-matnr = ls_mard-matnr.
+      IF p_xblk = abap_true.
+        ls_stk-menge = ls_mard-speme.
+      ELSEIF p_xqi = abap_true.
+        ls_stk-menge = ls_mard-insme.
+        READ TABLE lt_lot INTO ls_lot
+             WITH TABLE KEY matnr = ls_mard-matnr charg = space lgort = ls_mard-lgort.
+        IF sy-subrc = 0.
+          ls_stk-menge = ls_stk-menge - ls_lot-menge.
+        ENDIF.
+        IF ls_stk-menge < 0.
+          ls_stk-menge = 0.
+        ENDIF.
+        ls_stk-qitot = ls_mard-insme.
+        ls_stk-qilot = ls_mard-insme - ls_stk-menge.
+      ELSE.
+        ls_stk-menge = ls_mard-labst.
       ENDIF.
+      IF p_xunr = abap_false AND ls_stk-menge = 0 AND ls_stk-qitot = 0.
+        CONTINUE.
+      ENDIF.
+      COLLECT ls_stk INTO gt_stock.
     ENDLOOP.
   ENDIF.
 
@@ -294,9 +396,16 @@ FORM f_build_output.
   CLEAR gt_out.
 
   LOOP AT gt_stock INTO DATA(ls_stk).
-    DATA(ls_out) = VALUE gty_out( matnr = ls_stk-matnr
-                                  charg = ls_stk-charg
-                                  menge = ls_stk-menge ).
+    DATA(ls_out) = VALUE gty_out( matnr  = ls_stk-matnr
+                                  charg  = ls_stk-charg
+                                  menge  = ls_stk-menge
+                                  qitot  = ls_stk-qitot
+                                  qilot  = ls_stk-qilot
+                                  stktyp = COND #( WHEN p_xblk = abap_true
+                                                   THEN 'Blocked'
+                                                   WHEN p_xqi  = abap_true
+                                                   THEN 'QI without insp. lot'
+                                                   ELSE 'Unrestricted' ) ).
     READ TABLE gt_mat1 INTO DATA(ls_mat) WITH TABLE KEY matnr = ls_stk-matnr.
     IF sy-subrc = 0.
       ls_out-meins = ls_mat-meins.
@@ -320,7 +429,9 @@ FORM f_build_output.
       ls_out-status = gc_st_err.
     ELSEIF ls_out-menge = 0 AND p_zero = abap_false.
       ls_out-status = gc_st_zero.
-      ls_out-msg    = 'Zero quantity, not included'.
+      ls_out-msg    = COND #( WHEN ls_out-qilot > 0
+                              THEN 'All QI stock is in inspection lots, not included'
+                              ELSE 'Zero quantity, not included' ).
     ELSE.
       ls_out-status = gc_st_ok.
       ls_out-infile = abap_true.
@@ -405,7 +516,10 @@ FORM f_download_file.
     RETURN.
   ENDIF.
 
-  DATA(lv_default) = |ZPTP_SPLIT_VAL_{ p_werks1 }_{ p_werks2 }_{ sy-datum }.csv|.
+  DATA(lv_stock) = COND string( WHEN p_xblk = abap_true THEN 'BLOCKED'
+                                WHEN p_xqi  = abap_true THEN 'QI'
+                                ELSE 'UNRESTRICTED' ).
+  DATA(lv_default) = |ZPTP_SPLIT_VAL_{ p_werks1 }_{ p_werks2 }_{ lv_stock }_{ sy-datum }.csv|.
 
   cl_gui_frontend_services=>file_save_dialog(
     EXPORTING  window_title      = 'Save the Valuation Type Input File'
@@ -468,6 +582,23 @@ FORM f_display_alv.
       lo_cols->get_column( 'STATUS' )->set_visible( abap_false ).
       lo_cols->get_column( 'BWTAR'  )->set_medium_text( 'Val. type (P2)' ).
       lo_cols->get_column( 'MENGE'  )->set_medium_text( 'Quantity' ).
+      lo_cols->get_column( 'STKTYP' )->set_short_text( 'Stock' ).
+      lo_cols->get_column( 'STKTYP' )->set_medium_text( 'Stock type' ).
+      lo_cols->get_column( 'STKTYP' )->set_long_text( 'Stock type of the quantity' ).
+*     QI split, shown in QI mode only: Quantity = QI without lot (moved),
+*     QI in insp. lots = stays in plant 1, QI total = both
+      lo_cols->get_column( 'QITOT'  )->set_short_text( 'QI total' ).
+      lo_cols->get_column( 'QITOT'  )->set_medium_text( 'QI stock total' ).
+      lo_cols->get_column( 'QITOT'  )->set_long_text( 'Quality inspection stock, total' ).
+      lo_cols->get_column( 'QILOT'  )->set_short_text( 'QI in lots' ).
+      lo_cols->get_column( 'QILOT'  )->set_medium_text( 'QI in insp. lots' ).
+      lo_cols->get_column( 'QILOT'  )->set_long_text( 'QI stock in inspection lots (not moved)' ).
+      lo_cols->get_column( 'QITOT'  )->set_visible( p_xqi ).
+      lo_cols->get_column( 'QILOT'  )->set_visible( p_xqi ).
+      IF p_xqi = abap_true.
+        lo_cols->get_column( 'MENGE' )->set_medium_text( 'QI without lot' ).
+        lo_cols->get_column( 'MENGE' )->set_long_text( 'QI stock without insp. lot (in file)' ).
+      ENDIF.
       lo_cols->get_column( 'INFILE' )->set_medium_text( 'In file' ).
       CAST cl_salv_column_table( lo_cols->get_column( 'INFILE' ) )->set_cell_type( if_salv_c_cell_type=>checkbox ).
       lo_cols->get_column( 'NEWBAT' )->set_medium_text( 'New batch in P2' ).

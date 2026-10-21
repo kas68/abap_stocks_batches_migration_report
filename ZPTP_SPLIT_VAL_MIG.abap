@@ -3,7 +3,7 @@
 *&---------------------------------------------------------------------*
 *& Project : HBM - Split Valuation migration
 *& Scope   : Clearing of batch stocks / Inter-plant transfer
-*& Version : v0.8
+*& Version : v1.1
 *& Package : ZPTP_SPLIT_VAL        Message class: ZPTP_SPLIT_VAL
 *&
 *&---------------------------------------------------------------------*
@@ -61,6 +61,43 @@
 *&   the line, 3.3 check in Full mode). Option 2: batches of the source
 *&   plant (MCHA, not flagged for deletion) with no unrestricted stock, for
 *&   materials not in the file. Without P_ZBAT a zero line stays status Z.
+*&
+*& Stock scope (v0.9) - selection screen block B6, both options. The stock
+*&   read in the source plant for the quantity check and for the "SAP stock
+*&   not in file" reconciliation can be: unrestricted (default) /
+*&   unrestricted + blocked / unrestricted + blocked + quality inspection /
+*&   blocked only / quality inspection only. It is a CHECK scope: the 301
+*&   still moves unrestricted stock only, so a file quantity above the
+*&   unrestricted stock is blocked by the allocation check (005).
+*&   P_NOQTY deactivates the file-vs-SAP quantity check (3.5); the other
+*&   checks, the allocation and the reconciliation stay active.
+*&
+*& Transfer mode (v1.0) - selection screen block B7, both options:
+*&   - 1 Unrestricted stock (P_XUNR, default): one 301, as before.
+*&   - 2 Blocked stock (P_XBLK): 343 in the source plant (blocked ->
+*&     unrestricted), 301 (valuation type from the file), 344 in the
+*&     target plant (unrestricted -> blocked).
+*&   - 3 Quality inspection stock without inspection lot (P_XQI): 321 in
+*&     the source plant, 301, 322 in the target plant (back to quality
+*&     inspection). Only the QI quantity not held by an open inspection
+*&     lot (QALS-LMENGEZUB, stock-relevant lots) is moved; the lot stock
+*&     stays in the source plant.
+*&   Modes 2 / 3: one material document per step, committed one after the
+*&   other. 301 failed -> the first movement is reversed (344 / 322 in the
+*&   source plant). Last movement failed -> status W, the stock is
+*&   unrestricted in the target plant and the log says which movement to
+*&   post. Simulation checks the first movement only (the 301 needs the
+*&   stock to be unrestricted). The quantity check and the reconciliation
+*&   then compare the file with the stock being moved (block B6 ignored).
+*&
+*& Detailed log (v1.1):
+*&   - one ZPTP_MOV_EXEC row per movement and storage location in modes
+*&     2 / 3 (BWART 343 / 321, 301, 344 / 322, reversal), each with its own
+*&     material document;
+*&   - one run-parameter row per run (ZPTP_SPLIT_VAL 054): option, transfer
+*&     mode, stock scope, quantity check on / off, P_ZBAT, run mode;
+*&   - mode 3: one row per material / batch / storage location whose QI
+*&     stock is partly held by open inspection lots (ZPTP_SPLIT_VAL 055).
 *&
 *& Execution strategies (sec.5):
 *&   - Full Validation Mode  : runs all checks 3.2 - 3.5 (default).
@@ -129,7 +166,11 @@ CONSTANTS:
   gc_st_test    TYPE c VALUE 'T',   " simulation, not posted
   gc_st_zero    TYPE c VALUE 'Z',   " zero quantity - no movement
   gc_st_skip    TYPE c VALUE 'X',   " skipped (reconciliation)
-  gc_st_incons  TYPE c VALUE 'I'.   " inconsistent (SAP not in file)
+  gc_st_incons  TYPE c VALUE 'I',   " inconsistent (SAP not in file)
+* transfer mode                                              [v1.0]
+  gc_xfer_unr   TYPE c VALUE '1',   " unrestricted: 301
+  gc_xfer_blk   TYPE c VALUE '2',   " blocked: 343 / 301 / 344
+  gc_xfer_qi    TYPE c VALUE '3'.   " quality inspection: 321 / 301 / 322
 
 CONSTANTS:
 * storage-location pool: consume / give back
@@ -221,7 +262,8 @@ TYPES: BEGIN OF gty_stock,
          charg TYPE charg_d,
          werks TYPE werks_d,
          xchpf TYPE xchpf,
-         menge TYPE menge_d,
+         menge TYPE menge_d,      " stock of the selected scope [v0.9]
+         mfree TYPE menge_d,      " stock of the transfer mode: what is moved [v0.9, v1.0]
          meins TYPE meins,
        END OF gty_stock.
 TYPES: gtt_stock TYPE SORTED TABLE OF gty_stock
@@ -282,6 +324,7 @@ TYPES: BEGIN OF gty_out,
          werks_dst  TYPE werks_d,
          lgort_src  TYPE lgort_d,
          lgort_dst  TYPE lgort_d,
+         bwart      TYPE bwart,       " movement type of the row (blank = 301) [v1.1]
          menge_post TYPE menge_d,     " quantity of this posting line
          qty_input  TYPE menge_d,     " quantity of the input file line
          qty_sap    TYPE menge_d,
@@ -299,6 +342,20 @@ TYPES: BEGIN OF gty_out,
          rowcolor   TYPE c LENGTH 4,  " ALV row colour, ALV only
        END OF gty_out.
 TYPES: gtt_out TYPE STANDARD TABLE OF gty_out WITH DEFAULT KEY.
+
+* result of one movement of transfer modes 2 / 3, logged as its own rows
+*                                                              [v1.1]
+TYPES: BEGIN OF gty_step,
+         bwart   TYPE bwart,
+         status  TYPE c LENGTH 1,
+         mblnr   TYPE mblnr,
+         mjahr   TYPE mjahr,
+         msgid   TYPE symsgid,
+         msgno   TYPE symsgno,
+         msgty   TYPE symsgty,
+         message TYPE bapi_msg,
+       END OF gty_step.
+TYPES: gtt_step TYPE STANDARD TABLE OF gty_step WITH DEFAULT KEY.
 
 *&---------------------------------------------------------------------*
 *&  Local helper class (valuation-segment existence check)
@@ -450,6 +507,9 @@ DATA: gt_input_raw TYPE gtt_input_raw,
       gv_run_id    TYPE zdelot_run_id,
       gv_run_seq   TYPE numc3,
       gv_run_mode  TYPE c,
+      gv_scope_txt TYPE string,                   " label of the stock scope [v0.9]
+      gv_xfer      TYPE c,                        " transfer mode [v1.0]
+      gv_move_txt  TYPE string,                   " label of the stock moved [v1.0]
       gv_posnr     TYPE numc06.
 
 * storage locations of the target plant (T001L), buffered once [v0.4-27]
@@ -463,6 +523,16 @@ TYPES: BEGIN OF gty_sloc_map,
        END OF gty_sloc_map.
 DATA: gt_sloc_map TYPE SORTED TABLE OF gty_sloc_map WITH UNIQUE KEY lgort_src.
 
+* open inspection lots holding QI stock, per material / batch /
+* storage location (transfer mode 3)                          [v1.0]
+TYPES: BEGIN OF gty_qilot,
+         matnr TYPE matnr,
+         charg TYPE charg_d,
+         lgort TYPE lgort_d,
+         menge TYPE menge_d,
+       END OF gty_qilot.
+DATA: gt_qilot TYPE SORTED TABLE OF gty_qilot WITH UNIQUE KEY matnr charg lgort.
+
 * reference fields for SELECT-OPTIONS (FOR needs a field, not a table)
 DATA: gv_sel_matnr TYPE matnr,
       gv_sel_charg TYPE charg_d,
@@ -472,12 +542,39 @@ DATA: gv_sel_matnr TYPE matnr,
 *&---------------------------------------------------------------------*
 *&  Selection screen
 *&---------------------------------------------------------------------*
+* run control, shown first                                  [v1.1]
+SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE TEXT-b03.
+  PARAMETERS: p_test  TYPE abap_bool DEFAULT 'X' AS CHECKBOX.    " TESTRUN (simulation), first [v1.1]
+  PARAMETERS: p_runid TYPE zdelot_run_id,                          " blank = new RUN_ID
+              p_reprc TYPE abap_bool AS CHECKBOX.                " reprocess error lines only
+  PARAMETERS: p_full  RADIOBUTTON GROUP mod DEFAULT 'X',         " Full Validation Mode
+              p_dir   RADIOBUTTON GROUP mod.                     " Direct Transfer Mode
+  SELECT-OPTIONS: s_stat FOR gv_sel_stat.                        " ALV status filter, blank = all
+SELECTION-SCREEN END OF BLOCK b3.
+
 * processing option                                          [v0.7]
 SELECTION-SCREEN BEGIN OF BLOCK b5 WITH FRAME TITLE TEXT-b05.
   PARAMETERS: p_split  RADIOBUTTON GROUP opt DEFAULT 'X',        " 1 Split Valuation Materials
               p_nonspl RADIOBUTTON GROUP opt.                    " 2 Non split valuation materials
   PARAMETERS: p_zbat   TYPE abap_bool AS CHECKBOX.               " create batches with zero stock [v0.8]
 SELECTION-SCREEN END OF BLOCK b5.
+
+* stock type transferred                                    [v1.0]
+SELECTION-SCREEN BEGIN OF BLOCK b7 WITH FRAME TITLE TEXT-b07.
+  PARAMETERS: p_xunr RADIOBUTTON GROUP xfr DEFAULT 'X',          " 1 unrestricted: 301
+              p_xblk RADIOBUTTON GROUP xfr,                      " 2 blocked: 343 / 301 / 344
+              p_xqi  RADIOBUTTON GROUP xfr.                      " 3 QI without lot: 321 / 301 / 322
+SELECTION-SCREEN END OF BLOCK b7.
+
+* stock scope of the quantity check                          [v0.9]
+SELECTION-SCREEN BEGIN OF BLOCK b6 WITH FRAME TITLE TEXT-b06.
+  PARAMETERS: p_st1 RADIOBUTTON GROUP stk DEFAULT 'X',           " unrestricted
+              p_st2 RADIOBUTTON GROUP stk,                       " unrestricted + blocked
+              p_st3 RADIOBUTTON GROUP stk,                       " unrestricted + blocked + QI
+              p_st4 RADIOBUTTON GROUP stk,                       " blocked only
+              p_st5 RADIOBUTTON GROUP stk.                       " quality inspection only
+  PARAMETERS: p_noqty TYPE abap_bool AS CHECKBOX.                " deactivate the quantity check vs file
+SELECTION-SCREEN END OF BLOCK b6.
 
 SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-b01.
   PARAMETERS: p_wsrc TYPE werks_d OBLIGATORY DEFAULT '8P01',   " source plant
@@ -489,21 +586,12 @@ SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-b01.
 SELECTION-SCREEN END OF BLOCK b1.
 
 SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE TEXT-b02.
-  PARAMETERS: p_srv RADIOBUTTON GROUP src DEFAULT 'X'            " app server
+  PARAMETERS: p_srv RADIOBUTTON GROUP src                        " app server
                     USER-COMMAND src,
-              p_loc RADIOBUTTON GROUP src.                       " local (GUI upload)
+              p_loc RADIOBUTTON GROUP src DEFAULT 'X'.           " local (GUI upload), default [v1.1]
   PARAMETERS: p_file TYPE string LOWER CASE,
               p_sep  TYPE c DEFAULT ';'.
 SELECTION-SCREEN END OF BLOCK b2.
-
-SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE TEXT-b03.
-  PARAMETERS: p_runid TYPE zdelot_run_id,                          " blank = new RUN_ID
-              p_reprc TYPE abap_bool AS CHECKBOX.                " reprocess error lines only
-  PARAMETERS: p_full  RADIOBUTTON GROUP mod DEFAULT 'X',         " Full Validation Mode
-              p_dir   RADIOBUTTON GROUP mod.                     " Direct Transfer Mode
-  PARAMETERS: p_test  TYPE abap_bool DEFAULT 'X' AS CHECKBOX.    " TESTRUN (simulation)
-  SELECT-OPTIONS: s_stat FOR gv_sel_stat.                        " ALV status filter, blank = all
-SELECTION-SCREEN END OF BLOCK b3.
 
 SELECTION-SCREEN BEGIN OF BLOCK b4 WITH FRAME TITLE TEXT-b04.
   PARAMETERS: p_del TYPE abap_bool AS CHECKBOX,                  " delete RUN_ID (Z tables only)
@@ -668,6 +756,129 @@ FORM f_f4_status.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
+*&      Form  F_SCOPE_QTY                                       [v0.9]
+*&      Stock of one MCHB / MARD row that belongs to the scope chosen on
+*&      the selection screen (unrestricted, blocked, quality inspection).
+*&---------------------------------------------------------------------*
+FORM f_scope_qty USING    iv_unr TYPE menge_d
+                          iv_blk TYPE menge_d
+                          iv_qi  TYPE menge_d
+                 CHANGING cv_qty TYPE menge_d.
+  cv_qty = COND #( WHEN p_st2 = abap_true THEN iv_unr + iv_blk
+                   WHEN p_st3 = abap_true THEN iv_unr + iv_blk + iv_qi
+                   WHEN p_st4 = abap_true THEN iv_blk
+                   WHEN p_st5 = abap_true THEN iv_qi
+                   ELSE iv_unr ).
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_MOVE_QTY                                        [v1.0]
+*&      Quantity of one MCHB / MARD row that the transfer mode moves, and
+*&      the quantity compared with the file (stock scope of block B6 in
+*&      mode 1, the moved stock itself in modes 2 and 3). Mode 3 leaves
+*&      out the QI quantity held by open inspection lots.
+*&---------------------------------------------------------------------*
+FORM f_move_qty USING    iv_matnr TYPE matnr
+                         iv_charg TYPE charg_d
+                         iv_lgort TYPE lgort_d
+                         iv_unr   TYPE menge_d
+                         iv_blk   TYPE menge_d
+                         iv_qi    TYPE menge_d
+                CHANGING cv_move  TYPE menge_d
+                         cv_scope TYPE menge_d.
+  DATA ls_lot TYPE gty_qilot.
+
+  CASE gv_xfer.
+    WHEN gc_xfer_blk.
+      cv_move  = iv_blk.
+      cv_scope = cv_move.
+    WHEN gc_xfer_qi.
+*     QI stock of this storage location held by open inspection lots
+      cv_move = iv_qi.
+      READ TABLE gt_qilot INTO ls_lot
+           WITH TABLE KEY matnr = iv_matnr charg = iv_charg lgort = iv_lgort.
+      IF sy-subrc = 0.
+        cv_move = cv_move - ls_lot-menge.
+      ENDIF.
+      IF cv_move < 0.
+        cv_move = 0.
+      ENDIF.
+      cv_scope = cv_move.
+    WHEN OTHERS.
+      cv_move = iv_unr.
+      PERFORM f_scope_qty USING iv_unr iv_blk iv_qi CHANGING cv_scope.
+  ENDCASE.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_LOG_LOT_LEFT                                    [v1.1]
+*&      Transfer mode 3: QI stock of a material / batch / storage location
+*&      held by open inspection lots stays in the source plant. Logged
+*&      (ZPTP_SPLIT_VAL 055) for the materials the run deals with: in the
+*&      file (option 1), or not in the file (option 2).
+*&---------------------------------------------------------------------*
+FORM f_log_lot_left USING iv_matnr TYPE matnr
+                          iv_charg TYPE charg_d
+                          iv_lgort TYPE lgort_d
+                          iv_qty   TYPE menge_d
+                          iv_meins TYPE meins
+                          iv_xchpf TYPE xchpf.
+  DATA ls_out TYPE gty_out.
+
+  IF p_split = abap_true.
+    READ TABLE gt_input_sum TRANSPORTING NO FIELDS
+         WITH TABLE KEY matnr = iv_matnr charg = iv_charg.
+    CHECK sy-subrc = 0.
+  ELSE.
+    READ TABLE gt_file_matnr TRANSPORTING NO FIELDS
+         WITH TABLE KEY table_line = iv_matnr.
+    CHECK sy-subrc <> 0.
+  ENDIF.
+
+  ls_out-matnr     = iv_matnr.
+  ls_out-charg     = iv_charg.
+  ls_out-xchpf     = iv_xchpf.
+  ls_out-lgort_src = iv_lgort.
+  ls_out-qty_sap   = iv_qty.
+  ls_out-meins     = iv_meins.
+  ls_out-bwart     = '321'.
+  ls_out-status    = gc_st_warn.
+  ls_out-message   = |{ iv_qty } { iv_meins } of QI stock held by open inspection lots | &&
+                     |stays in plant { p_wsrc }, storage location { iv_lgort } - not moved|.
+  PERFORM f_add_log USING gc_msgid '055' 'W' CHANGING ls_out.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_READ_QI_LOTS                                    [v1.0]
+*&      QI stock still held by open, stock-relevant inspection lots of the
+*&      source plant (QALS-LMENGEZUB = quantity still to be posted by the
+*&      usage decision). This stock is not moved by transfer mode 3.
+*&      Per material / batch / storage location (QALS-LAGORTCHRG).
+*&      Assumption to verify: LMENGEZUB is in the base unit.
+*&---------------------------------------------------------------------*
+FORM f_read_qi_lots.
+  DATA ls_lot TYPE gty_qilot.
+
+  CLEAR gt_qilot.
+  SELECT matnr, charg, lagortchrg, lmengezub
+    FROM qals
+    INTO TABLE @DATA(lt_qals)
+    WHERE werk      =  @p_wsrc
+      AND matnr     IN @s_matnr
+      AND insmk     =  @abap_true
+      AND lmengezub >  0.
+
+  LOOP AT lt_qals INTO DATA(ls_qals).
+    CLEAR ls_lot.
+    ls_lot-matnr = ls_qals-matnr.
+    ls_lot-charg = ls_qals-charg.
+    ls_lot-lgort = ls_qals-lagortchrg.
+    ls_lot-menge = ls_qals-lmengezub.
+    COLLECT ls_lot INTO gt_qilot.
+  ENDLOOP.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
 *&      Form  F_F4_FILE                                         [v0.5-30]
 *&      F4 help for the input file path (local and application server)
 *&---------------------------------------------------------------------*
@@ -828,6 +1039,24 @@ FORM f_init.
       AND werks_dst = @p_wdst.
 
 * Option 2 always runs its own checks: P_DIR is ignored   [v0.7]
+  gv_xfer = COND #( WHEN p_xblk = abap_true THEN gc_xfer_blk
+                    WHEN p_xqi  = abap_true THEN gc_xfer_qi
+                    ELSE gc_xfer_unr ).
+  gv_move_txt = SWITCH #( gv_xfer
+                          WHEN gc_xfer_blk THEN 'blocked stock'
+                          WHEN gc_xfer_qi  THEN 'QI stock without inspection lot'
+                          ELSE 'unrestricted stock' ).
+
+  gv_scope_txt = COND #( WHEN p_st2 = abap_true THEN 'unrestricted + blocked stock'
+                         WHEN p_st3 = abap_true THEN 'unrestricted + blocked + QI stock'
+                         WHEN p_st4 = abap_true THEN 'blocked stock'
+                         WHEN p_st5 = abap_true THEN 'quality inspection stock'
+                         ELSE 'unrestricted stock' ).
+* modes 2 and 3: the file is compared with the stock being moved [v1.0]
+  IF gv_xfer <> gc_xfer_unr.
+    gv_scope_txt = gv_move_txt.
+  ENDIF.
+
   gv_run_mode = COND #( WHEN p_dir = abap_true AND p_split = abap_true
                         THEN gc_mode_dir ELSE gc_mode_full ).
 
@@ -855,12 +1084,51 @@ FORM f_init.
   WRITE: / 'Option:', COND string( WHEN p_nonspl = abap_true
                                    THEN '2 - Non split valuation materials'
                                    ELSE '1 - Split Valuation Materials' ).
+  WRITE: / 'Stock moved:', gv_move_txt,
+           SWITCH string( gv_xfer WHEN gc_xfer_blk THEN '(343 / 301 / 344)'
+                                  WHEN gc_xfer_qi  THEN '(321 / 301 / 322)'
+                                  ELSE '(301)' ).
+  WRITE: / 'Stock checked:', gv_scope_txt,
+           COND string( WHEN p_noqty = abap_true
+                        THEN '- quantity check vs file DEACTIVATED' ELSE '' ).
   WRITE: / 'Transfer:', p_wsrc, '->', p_wdst, '(storage locations mapped by ZPTP_SLOC_MAP)',
            'Posting date:', p_budat.
   IF p_test = abap_true.
     WRITE: / '*** SIMULATION (TESTRUN) - no posting ***' COLOR COL_TOTAL.
   ENDIF.
   SKIP.
+
+* run parameters, logged once per run                         [v1.1]
+  PERFORM f_log_run_params.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_LOG_RUN_PARAMS                                  [v1.1]
+*&      One ZPTP_MOV_EXEC row (ZPTP_SPLIT_VAL 054) holding the parameters
+*&      that change what is checked and moved, so that a run can be
+*&      understood from the log alone.
+*&---------------------------------------------------------------------*
+FORM f_log_run_params.
+  DATA ls_out TYPE gty_out.
+
+  ls_out-status  = gc_st_warn.
+  ls_out-bwart   = SWITCH #( gv_xfer WHEN gc_xfer_blk THEN '343'
+                                      WHEN gc_xfer_qi  THEN '321'
+                                      ELSE gc_mov_type ).
+  ls_out-message = |Run parameters: option { COND string( WHEN p_nonspl = abap_true
+                                                          THEN '2 non split' ELSE '1 split' ) }| &&
+                   |, transfer mode { SWITCH string( gv_xfer
+                                        WHEN gc_xfer_blk THEN '2 blocked (343/301/344)'
+                                        WHEN gc_xfer_qi  THEN '3 QI without lot (321/301/322)'
+                                        ELSE '1 unrestricted (301)' ) }| &&
+                   |, stock checked: { gv_scope_txt }| &&
+                   |, quantity check vs file: { COND string( WHEN p_noqty = abap_true
+                                                             THEN 'OFF' ELSE 'ON' ) }| &&
+                   |, { COND string( WHEN gv_run_mode = gc_mode_dir THEN 'DIRECT' ELSE 'FULL' ) }| &&
+                   |, zero-stock batches: { COND string( WHEN p_zbat = abap_true
+                                                         THEN 'YES' ELSE 'NO' ) }| &&
+                   |{ COND string( WHEN p_reprc = abap_true THEN ', reprocess errors only' ) }|.
+  PERFORM f_add_log USING gc_msgid '054' 'W' CHANGING ls_out.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
@@ -940,9 +1208,13 @@ FORM f_delete_run.
     RETURN.
   ENDIF.
 
+* any row carrying a real document (status S, or W when the last of the
+* three movements of transfer modes 2 / 3 failed)            [v1.0]
   SELECT SINGLE posnr FROM zptp_mov_exec INTO @DATA(lv_posted)
     WHERE run_id  = @p_runid
-      AND status  = @gc_st_ok
+      AND status  IN (@gc_st_ok, @gc_st_warn)
+      AND mblnr   <> @space
+      AND mblnr   <> 'SIMULATED'
       AND testrun = @space.
   IF sy-subrc = 0.
     MESSAGE |RUN_ID { p_runid } holds posted material documents - its log cannot be deleted|
@@ -1397,7 +1669,7 @@ FORM f_validate_no_batch.
     RETURN.
   ENDIF.
 
-* Materials that actually carry unrestricted batch stock in the source
+* Materials that actually carry batch stock in the source
 * plant. A material master can state that a material is not
 * batch-managed while batches created earlier still hold stock; such a
 * material cannot be transferred as a non-batch record, because the
@@ -1407,7 +1679,7 @@ FORM f_validate_no_batch.
     FROM mchb
     WHERE werks =  @p_wsrc
       AND matnr IN @s_matnr
-      AND clabs >  0.
+      AND ( clabs > 0 OR cspem > 0 OR cinsm > 0 ).             " [v1.0]
 
   LOOP AT gt_input_raw INTO ls_raw WHERE nobat = abap_true.
 
@@ -1448,7 +1720,7 @@ FORM f_validate_no_batch.
           ls_raw-bad   = abap_true.
           ls_raw-badno = '015'.
           ls_raw-badtx = |Material { ls_raw-matnr } declares NO_BATCH but holds | &&
-                         |unrestricted batch stock in plant { p_wsrc } (MCHB)|.
+                         |batch stock in plant { p_wsrc } (MCHB)|.
         ENDIF.
       ENDIF.
     ENDIF.
@@ -1623,49 +1895,69 @@ FORM f_aggregate_input.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*&      Form  F_READ_SAP_STOCK                                [v0.2 - 1]
-*&      Unrestricted stock only. Batch-managed -> MCHB-CLABS,
-*&      non-batch -> MARD-LABST. Batch flag from MARC-XCHPF.
-*&      Stock is kept twice: aggregated per MATNR+CHARG for the
-*&      reconciliation, and per MATNR+CHARG+LGORT for the allocation of
-*&      the issuing storage locations.
+*&      Form  F_READ_SAP_STOCK                      [v0.2 - 1, v0.9, v1.0]
+*&      Source-plant stock, batch-managed -> MCHB, non-batch -> MARD.
+*&      Kept twice: aggregated per MATNR+CHARG (MENGE = stock compared with
+*&      the file, MFREE = stock moved by the transfer mode), and per
+*&      MATNR+CHARG+LGORT with the stock moved by the transfer mode, for
+*&      the allocation of the issuing storage locations (F_MOVE_QTY).
 *&---------------------------------------------------------------------*
 FORM f_read_sap_stock.
 
-  DATA: ls_stk TYPE gty_stock,
-        ls_loc TYPE gty_stock_loc.
+  DATA: ls_stk   TYPE gty_stock,
+        ls_loc   TYPE gty_stock_loc,
+        lv_scope TYPE menge_d,
+        lv_move  TYPE menge_d,                                  " [v1.0]
+        lv_nochg TYPE charg_d,                                  " blank batch, typed
+        lv_noxch TYPE xchpf,                                    " not batch-managed, typed
+        lv_left  TYPE menge_d.                                  " QI held by lots [v1.1]
 
-* --- batch-managed materials: MCHB unrestricted (CLABS) per LGORT ---
-  SELECT matnr, werks, lgort, charg, clabs
+  IF gv_xfer = gc_xfer_qi.
+    PERFORM f_read_qi_lots.
+  ENDIF.
+
+* --- batch-managed materials: MCHB (CLABS / CSPEM / CINSM) per LGORT --
+  SELECT matnr, werks, lgort, charg, clabs, cspem, cinsm
     INTO TABLE @DATA(lt_mchb)
     FROM mchb
     WHERE werks =  @p_wsrc
       AND matnr IN @s_matnr
       AND charg IN @s_charg
-      AND clabs >  0.                                        " [v0.3-25]
+      AND ( clabs > 0 OR cspem > 0 OR cinsm > 0 ).             " [v0.9]
 
   LOOP AT lt_mchb INTO DATA(ls_mchb).
     READ TABLE gt_marc INTO DATA(ls_marc)
          WITH KEY matnr = ls_mchb-matnr werks = p_wsrc.
     CHECK sy-subrc = 0 AND ls_marc-batchmgd = abap_true   " batch mats only
                       AND ls_marc-mtart IN s_mtart.
-    CHECK ls_mchb-clabs > 0.
+    PERFORM f_move_qty USING ls_mchb-matnr ls_mchb-charg ls_mchb-lgort
+                             ls_mchb-clabs ls_mchb-cspem ls_mchb-cinsm
+                       CHANGING lv_move lv_scope.
+    IF gv_xfer = gc_xfer_qi AND ls_mchb-cinsm > lv_move.            " [v1.1]
+      lv_left = ls_mchb-cinsm - lv_move.
+      PERFORM f_log_lot_left USING ls_mchb-matnr ls_mchb-charg ls_mchb-lgort
+                                   lv_left ls_marc-meins gc_xchpf.
+    ENDIF.
+    CHECK lv_scope > 0.
 
-*   per storage location
-    CLEAR ls_loc.
-    ls_loc-matnr = ls_mchb-matnr.
-    ls_loc-charg = ls_mchb-charg.
-    ls_loc-lgort = ls_mchb-lgort.
-    ls_loc-menge = ls_mchb-clabs.
-    ls_loc-remng = ls_mchb-clabs.
-    ls_loc-meins = ls_marc-meins.
-    INSERT ls_loc INTO TABLE gt_stock_loc.
+*   per storage location: the stock of the transfer mode, what is moved
+    IF lv_move > 0.
+      CLEAR ls_loc.
+      ls_loc-matnr = ls_mchb-matnr.
+      ls_loc-charg = ls_mchb-charg.
+      ls_loc-lgort = ls_mchb-lgort.
+      ls_loc-menge = lv_move.
+      ls_loc-remng = lv_move.
+      ls_loc-meins = ls_marc-meins.
+      INSERT ls_loc INTO TABLE gt_stock_loc.
+    ENDIF.
 
-*   aggregated
+*   aggregated: stock of the selected scope, and its unrestricted part
     READ TABLE gt_stock INTO ls_stk
          WITH KEY matnr = ls_mchb-matnr charg = ls_mchb-charg.
     IF sy-subrc = 0.
-      ls_stk-menge = ls_stk-menge + ls_mchb-clabs.
+      ls_stk-menge = ls_stk-menge + lv_scope.
+      ls_stk-mfree = ls_stk-mfree + lv_move.
       MODIFY TABLE gt_stock FROM ls_stk.
     ELSE.
       CLEAR ls_stk.
@@ -1673,39 +1965,52 @@ FORM f_read_sap_stock.
       ls_stk-charg = ls_mchb-charg.
       ls_stk-werks = ls_mchb-werks.
       ls_stk-xchpf = gc_xchpf.
-      ls_stk-menge = ls_mchb-clabs.
+      ls_stk-menge = lv_scope.
+      ls_stk-mfree = lv_move.
       ls_stk-meins = ls_marc-meins.
       INSERT ls_stk INTO TABLE gt_stock.
     ENDIF.
   ENDLOOP.
 
-* --- non-batch materials: MARD unrestricted (LABST) per LGORT -------
-  SELECT matnr, werks, lgort, labst
+* --- non-batch materials: MARD (LABST / SPEME / INSME) per LGORT -----
+  SELECT matnr, werks, lgort, labst, speme, insme
     INTO TABLE @DATA(lt_mard)
     FROM mard
     WHERE werks =  @p_wsrc
-      AND matnr IN @s_matnr.
+      AND matnr IN @s_matnr
+      AND ( labst > 0 OR speme > 0 OR insme > 0 ).             " [v0.9]
 
   LOOP AT lt_mard INTO DATA(ls_mard).
     READ TABLE gt_marc INTO ls_marc
          WITH KEY matnr = ls_mard-matnr werks = p_wsrc.
     CHECK sy-subrc = 0 AND ls_marc-batchmgd = abap_false  " non-batch only
                       AND ls_marc-mtart IN s_mtart.
-    CHECK ls_mard-labst > 0.
+    PERFORM f_move_qty USING ls_mard-matnr lv_nochg ls_mard-lgort
+                             ls_mard-labst ls_mard-speme ls_mard-insme
+                       CHANGING lv_move lv_scope.
+    IF gv_xfer = gc_xfer_qi AND ls_mard-insme > lv_move.            " [v1.1]
+      lv_left = ls_mard-insme - lv_move.
+      PERFORM f_log_lot_left USING ls_mard-matnr lv_nochg ls_mard-lgort
+                                   lv_left ls_marc-meins lv_noxch.
+    ENDIF.
+    CHECK lv_scope > 0.
 
-    CLEAR ls_loc.
-    ls_loc-matnr = ls_mard-matnr.
-    ls_loc-charg = space.
-    ls_loc-lgort = ls_mard-lgort.
-    ls_loc-menge = ls_mard-labst.
-    ls_loc-remng = ls_mard-labst.
-    ls_loc-meins = ls_marc-meins.
-    INSERT ls_loc INTO TABLE gt_stock_loc.
+    IF lv_move > 0.
+      CLEAR ls_loc.
+      ls_loc-matnr = ls_mard-matnr.
+      ls_loc-charg = space.
+      ls_loc-lgort = ls_mard-lgort.
+      ls_loc-menge = lv_move.
+      ls_loc-remng = lv_move.
+      ls_loc-meins = ls_marc-meins.
+      INSERT ls_loc INTO TABLE gt_stock_loc.
+    ENDIF.
 
     READ TABLE gt_stock INTO ls_stk
          WITH KEY matnr = ls_mard-matnr charg = space.
     IF sy-subrc = 0.
-      ls_stk-menge = ls_stk-menge + ls_mard-labst.
+      ls_stk-menge = ls_stk-menge + lv_scope.
+      ls_stk-mfree = ls_stk-mfree + lv_move.
       MODIFY TABLE gt_stock FROM ls_stk.
     ELSE.
       CLEAR ls_stk.
@@ -1713,7 +2018,8 @@ FORM f_read_sap_stock.
       ls_stk-charg = space.
       ls_stk-werks = ls_mard-werks.
       ls_stk-xchpf = space.
-      ls_stk-menge = ls_mard-labst.
+      ls_stk-menge = lv_scope.
+      ls_stk-mfree = lv_move.
       ls_stk-meins = ls_marc-meins.
       INSERT ls_stk INTO TABLE gt_stock.
     ENDIF.
@@ -2015,7 +2321,8 @@ FORM f_prepare_nonsplit.
     CLEAR ls_raw.
     ls_raw-matnr = ls_stk-matnr.
     ls_raw-charg = ls_stk-charg.
-    ls_raw-menge = ls_stk-menge.              " whole unrestricted stock (0 for P_ZBAT batches)
+    ls_raw-menge = ls_stk-mfree.              " whole stock of the transfer mode (0 for P_ZBAT
+                                              " batches and for stock held only in other categories)
     ls_raw-meins = ls_stk-meins.              " base unit
 
     READ TABLE gt_marc INTO ls_src
@@ -2076,7 +2383,10 @@ FORM f_process_lines.
         lv_cmsg  TYPE bapi_msg,
         lv_lgmis TYPE lgort_d,                          " [v0.4-27]
         lv_nomap TYPE lgort_d,                          " [v0.6-41]
-        lv_zdone TYPE abap_bool.                        " [v0.8]
+        lv_zdone TYPE abap_bool,                        " [v0.8]
+        lv_part  TYPE abap_bool,                        " last movement failed [v1.0]
+        lt_steps TYPE gtt_step,                         " movements of modes 2 / 3 [v1.1]
+        ls_step  TYPE gty_step.
 
 * memorised batch-extension result per MATNR + CHARG          [v0.2 - 6]
   DATA: lt_done TYPE gtt_done,
@@ -2124,7 +2434,9 @@ FORM f_process_lines.
         ENDIF.
       ENDIF.
       ls_out-status  = gc_st_zero.
-      ls_out-message = 'Zero quantity in input file - no movement created'.
+      ls_out-message = COND #( WHEN p_nonspl = abap_true
+                               THEN |No { gv_move_txt } to move - no movement created|
+                               ELSE 'Zero quantity in input file - no movement created' ).
       PERFORM f_add_log_loc USING gc_msgid '002' 'W' ls_raw-matnr ls_raw-charg
                             CHANGING ls_out.
       CONTINUE.
@@ -2135,7 +2447,7 @@ FORM f_process_lines.
 *   applied in both modes: without stock there is nothing to issue.
     IF lv_found = abap_false.
       ls_out-status  = gc_st_err.
-      ls_out-message = |No unrestricted stock in plant { p_wsrc } for material | &&
+      ls_out-message = |No { gv_scope_txt } in plant { p_wsrc } for material | &&
                        |{ ls_raw-matnr } batch { ls_raw-charg }|.
       PERFORM f_add_log USING gc_msgid '006' 'E' CHANGING ls_out.
       CONTINUE.
@@ -2155,13 +2467,16 @@ FORM f_process_lines.
         CONTINUE.
       ENDIF.
 
-*     3.5 quantity validation: file total = SAP unrestricted stock
+*     3.5 quantity validation: file total = SAP stock of the selected
+*     scope (unrestricted by default); P_NOQTY deactivates it  [v0.9]
       READ TABLE gt_input_sum INTO ls_sum
            WITH KEY matnr = ls_raw-matnr charg = ls_raw-charg.
       ls_out-variance = ls_sum-menge - ls_out-qty_sap.   " MENGE_D keeps the 3 decimals
-      IF ls_out-variance <> 0.
+      IF p_noqty = abap_true.
+        CLEAR ls_out-variance.
+      ELSEIF ls_out-variance <> 0.
         ls_out-status  = gc_st_err.
-        ls_out-message = |Quantity mismatch: file { ls_sum-menge } vs SAP { ls_out-qty_sap } (var { ls_out-variance })|.
+        ls_out-message = |Quantity mismatch: file { ls_sum-menge } vs SAP { ls_out-qty_sap } ({ gv_scope_txt }, var { ls_out-variance })|.
         PERFORM f_add_log_loc USING gc_msgid '004' 'E' ls_raw-matnr ls_raw-charg
                               CHANGING ls_out.
         CONTINUE.
@@ -2269,15 +2584,26 @@ FORM f_process_lines.
     ENDIF.
 
 *   --- 3.6b Post 301 (one document, one item per issuing LGORT) ------
-    PERFORM f_post_301 USING ls_raw lt_alloc lv_vt
-                       CHANGING lv_mblnr lv_mjahr lv_msg lv_id lv_no lv_ty.
+*   Modes 2 / 3: 343 or 321, 301, then 344 or 322              [v1.0]
+    CLEAR: lv_part, lt_steps.
+    IF gv_xfer = gc_xfer_unr.
+      PERFORM f_post_301 USING ls_raw lt_alloc lv_vt
+                         CHANGING lv_mblnr lv_mjahr lv_msg lv_id lv_no lv_ty.
+    ELSE.
+      PERFORM f_post_chain USING ls_raw lt_alloc lv_vt
+                           CHANGING lv_mblnr lv_mjahr lv_msg lv_id lv_no lv_ty lv_part
+                                    lt_steps.
+    ENDIF.
 
     IF lv_mblnr IS NOT INITIAL.
       ls_out-status = COND #( WHEN p_test = abap_true THEN gc_st_test
+                              WHEN lv_part = abap_true THEN gc_st_warn
                                                       ELSE gc_st_ok ).
       ls_out-mblnr  = lv_mblnr.
       ls_out-mjahr  = lv_mjahr.
-      ls_out-message = COND #( WHEN p_test = abap_true
+      ls_out-message = COND #( WHEN gv_xfer <> gc_xfer_unr
+                               THEN lv_msg
+                               WHEN p_test = abap_true
                                THEN 'Simulation OK - posting checked (TESTRUN), no document'
                                ELSE |Material document { lv_mblnr }/{ lv_mjahr }| ).
       IF lv_split = abap_false AND ls_raw-bwtar IS NOT INITIAL.
@@ -2291,21 +2617,46 @@ FORM f_process_lines.
       PERFORM f_consume_alloc USING lt_alloc ls_raw-matnr ls_raw-charg gc_back.
     ENDIF.
 
-*   one log row per issuing storage location
-    LOOP AT lt_alloc INTO ls_alloc.
-      ls_out-lgort_src  = ls_alloc-lgort.
-      ls_out-lgort_dst  = ls_alloc-lgort_dst.  " from ZPTP_SLOC_MAP      [v0.6-41]
-      ls_out-menge_post = ls_alloc-menge.
-      PERFORM f_add_log USING lv_id lv_no lv_ty CHANGING ls_out.
-    ENDLOOP.
+*   one log row per issuing storage location; modes 2 / 3: one row per
+*   movement and storage location, each with its own document [v1.1]
+    IF gv_xfer = gc_xfer_unr OR lt_steps IS INITIAL.
+      LOOP AT lt_alloc INTO ls_alloc.
+        ls_out-lgort_src  = ls_alloc-lgort.
+        ls_out-lgort_dst  = ls_alloc-lgort_dst.  " from ZPTP_SLOC_MAP    [v0.6-41]
+        ls_out-menge_post = ls_alloc-menge.
+        PERFORM f_add_log USING lv_id lv_no lv_ty CHANGING ls_out.
+      ENDLOOP.
+    ELSE.
+      LOOP AT lt_steps INTO ls_step.
+        ls_out-bwart   = ls_step-bwart.
+        ls_out-status  = ls_step-status.
+        ls_out-mblnr   = ls_step-mblnr.
+        ls_out-mjahr   = ls_step-mjahr.
+        ls_out-message = ls_step-message.
+        IF ls_step-bwart = gc_mov_type AND lv_split = abap_false
+                                       AND ls_raw-bwtar IS NOT INITIAL.
+          ls_out-message = |{ ls_out-message } - no valuation type: material not | &&
+                           |split-valuated in plant { p_wdst }|.
+        ENDIF.
+        LOOP AT lt_alloc INTO ls_alloc.
+          ls_out-lgort_src  = ls_alloc-lgort.
+          ls_out-lgort_dst  = ls_alloc-lgort_dst.
+          ls_out-menge_post = ls_alloc-menge.
+          PERFORM f_add_log USING ls_step-msgid ls_step-msgno ls_step-msgty
+                            CHANGING ls_out.
+        ENDLOOP.
+      ENDLOOP.
+    ENDIF.
 
 *   Commit: the posting (update task) and its log rows in one LUW, so a
 *   posted document can never lack its log.                 [v0.3-20]
     PERFORM f_flush_logs CHANGING lv_cerr lv_cmsg.
 
 *   The update task can still fail after the commit: the document does
-*   not exist, and the log says so.
-    IF lv_cerr = abap_true AND p_test = abap_false AND lv_mblnr IS NOT INITIAL.
+*   not exist, and the log says so. Modes 2 / 3 committed each document
+*   already: this commit only carries the log rows.          [v1.0]
+    IF lv_cerr = abap_true AND p_test = abap_false AND lv_mblnr IS NOT INITIAL
+       AND gv_xfer = gc_xfer_unr.
       DATA(lv_utxt) = CONV natxt( |Update failed after commit - document | &&
                                   |{ lv_mblnr } not posted. { lv_cmsg }| ).
       UPDATE zptp_mov_exec
@@ -2519,6 +2870,269 @@ FORM f_extend_batch USING iv_matnr TYPE matnr
 ENDFORM.
 
 *&---------------------------------------------------------------------*
+*&      Form  F_POST_CHAIN                                      [v1.0]
+*&      Transfer modes 2 and 3: three material documents, each committed
+*&      before the next one, because each movement needs the stock left by
+*&      the previous one.
+*&        1  343 (blocked -> unrestricted) / 321 (QI -> unrestricted),
+*&           source plant, issuing storage locations
+*&        2  301 with the target valuation type (F_POST_301)
+*&        3  344 (unrestricted -> blocked) / 322 (unrestricted -> QI),
+*&           target plant, receiving storage locations
+*&      301 failed: the first movement is reversed in the source plant
+*&      (344 / 322), the line ends in error and the stock is back where it
+*&      was. Movement 3 failed: CV_PART is set, the stock is unrestricted
+*&      in the target plant and the message says what to post.
+*&      Simulation: only movement 1 can be checked by the BAPI.
+*&      CV_MBLNR returns the 301 document.
+*&---------------------------------------------------------------------*
+FORM f_post_chain USING is_raw   TYPE gty_input_raw
+                        it_alloc TYPE gtt_alloc
+                        iv_bwtar TYPE bwtar_d
+                  CHANGING cv_mblnr TYPE mblnr
+                           cv_mjahr TYPE mjahr
+                           cv_msg   TYPE bapi_msg
+                           cv_id    TYPE symsgid
+                           cv_no    TYPE symsgno
+                           cv_ty    TYPE symsgty
+                           cv_part  TYPE abap_bool
+                           ct_steps TYPE gtt_step.
+
+  DATA: lv_out  TYPE bwart,           " movement 1 (source plant)
+        lv_in   TYPE bwart,           " movement 3 (target plant), also the reversal of 1
+        lv_d1   TYPE mblnr, lv_y1 TYPE mjahr,
+        lv_d2   TYPE mblnr, lv_y2 TYPE mjahr,
+        lv_d3   TYPE mblnr, lv_y3 TYPE mjahr,
+        lv_dr   TYPE mblnr, lv_yr TYPE mjahr,
+        lv_msg  TYPE bapi_msg,
+        lv_id   TYPE symsgid,
+        lv_no   TYPE symsgno,
+        lv_ty   TYPE symsgty,
+        lv_cerr TYPE abap_bool,
+        lv_cmsg TYPE bapi_msg,
+        lv_none TYPE bwtar_d.
+
+  CLEAR: cv_mblnr, cv_mjahr, cv_msg, cv_id, cv_no, cv_ty, cv_part, ct_steps.
+  lv_out = COND #( WHEN gv_xfer = gc_xfer_blk THEN '343' ELSE '321' ).
+  lv_in  = COND #( WHEN gv_xfer = gc_xfer_blk THEN '344' ELSE '322' ).
+
+* --- 1. source plant: to unrestricted -----------------------------------
+  PERFORM f_post_stock_type USING is_raw it_alloc lv_out p_wsrc abap_false lv_none
+                            CHANGING lv_d1 lv_y1 lv_msg lv_id lv_no lv_ty.
+  IF lv_d1 IS INITIAL.
+    cv_id = lv_id. cv_no = lv_no. cv_ty = lv_ty.
+    cv_msg = |{ lv_out } in plant { p_wsrc } failed: { lv_msg }|.
+    APPEND VALUE #( bwart = lv_out status = gc_st_err msgid = lv_id msgno = lv_no
+                    msgty = lv_ty message = cv_msg ) TO ct_steps.
+    RETURN.
+  ENDIF.
+
+  IF p_test = abap_true.
+    cv_mblnr = 'SIMULATED'.
+    cv_mjahr = p_budat(4).
+    cv_msg   = |Simulation OK - { lv_out } checked in plant { p_wsrc }; 301 and { lv_in } | &&
+               |are checked at posting only (they need the stock moved by the { lv_out })|.
+    APPEND VALUE #( bwart = lv_out status = gc_st_test mblnr = cv_mblnr mjahr = cv_mjahr
+                    message = cv_msg ) TO ct_steps.
+    RETURN.
+  ENDIF.
+
+  PERFORM f_commit CHANGING lv_cerr lv_cmsg.
+  IF lv_cerr = abap_true.
+    cv_id = gc_msgid. cv_no = '022'. cv_ty = 'E'.
+    cv_msg = |{ lv_out } document { lv_d1 } not posted (update failed): { lv_cmsg }|.
+    APPEND VALUE #( bwart = lv_out status = gc_st_err msgid = cv_id msgno = cv_no
+                    msgty = cv_ty message = cv_msg ) TO ct_steps.
+    RETURN.
+  ENDIF.
+  APPEND VALUE #( bwart = lv_out status = gc_st_ok mblnr = lv_d1 mjahr = lv_y1
+                  message = |{ lv_out } document { lv_d1 }/{ lv_y1 }: { gv_move_txt } to | &&
+                            |unrestricted in plant { p_wsrc }| ) TO ct_steps.
+
+* --- 2. 301 to the target plant -------------------------------------------
+  PERFORM f_post_301 USING is_raw it_alloc iv_bwtar
+                     CHANGING lv_d2 lv_y2 lv_msg lv_id lv_no lv_ty.
+  IF lv_d2 IS NOT INITIAL.
+    PERFORM f_commit CHANGING lv_cerr lv_cmsg.
+    IF lv_cerr = abap_true.
+      CLEAR lv_d2.
+      lv_id = gc_msgid. lv_no = '022'. lv_ty = 'E'.
+      lv_msg = |update failed: { lv_cmsg }|.
+    ENDIF.
+  ENDIF.
+
+  IF lv_d2 IS INITIAL.
+    cv_id = lv_id. cv_no = lv_no. cv_ty = lv_ty.
+    cv_msg = |301 failed: { lv_msg }|.
+    APPEND VALUE #( bwart = gc_mov_type status = gc_st_err msgid = lv_id msgno = lv_no
+                    msgty = lv_ty message = cv_msg ) TO ct_steps.
+*   put the stock back where it was: reversal of movement 1
+    PERFORM f_post_stock_type USING is_raw it_alloc lv_in p_wsrc abap_false lv_none
+                              CHANGING lv_dr lv_yr lv_msg lv_id lv_no lv_ty.
+    IF lv_dr IS NOT INITIAL.
+      PERFORM f_commit CHANGING lv_cerr lv_cmsg.
+      IF lv_cerr = abap_true.
+        CLEAR lv_dr.
+        lv_id = gc_msgid. lv_no = '022'. lv_ty = 'E'.
+        lv_msg = |update failed: { lv_cmsg }|.
+      ENDIF.
+    ENDIF.
+    IF lv_dr IS NOT INITIAL.
+      cv_msg = |{ cv_msg } - { lv_out } { lv_d1 } reversed by { lv_in } { lv_dr }|.
+      APPEND VALUE #( bwart = lv_in status = gc_st_ok mblnr = lv_dr mjahr = lv_yr
+                      message = |{ lv_in } document { lv_dr }/{ lv_yr }: reversal of | &&
+                                |{ lv_out } { lv_d1 } in plant { p_wsrc } (301 failed)| ) TO ct_steps.
+    ELSE.
+      cv_msg = |{ cv_msg } - REVERSAL FAILED ({ lv_msg }): { lv_out } { lv_d1 } posted, | &&
+               |stock unrestricted in plant { p_wsrc } - post { lv_in } manually|.
+      APPEND VALUE #( bwart = lv_in status = gc_st_err msgid = lv_id msgno = lv_no
+                      msgty = lv_ty
+                      message = |REVERSAL FAILED: { lv_msg } - { lv_out } { lv_d1 } posted, | &&
+                                |stock unrestricted in plant { p_wsrc }, post { lv_in } manually| )
+             TO ct_steps.
+    ENDIF.
+    RETURN.
+  ENDIF.
+
+  cv_mblnr = lv_d2.
+  cv_mjahr = lv_y2.
+  APPEND VALUE #( bwart = gc_mov_type status = gc_st_ok mblnr = lv_d2 mjahr = lv_y2
+                  message = |301 document { lv_d2 }/{ lv_y2 }: plant { p_wsrc } to plant { p_wdst }| )
+         TO ct_steps.
+
+* --- 3. target plant: back to blocked / QI --------------------------------
+  PERFORM f_post_stock_type USING is_raw it_alloc lv_in p_wdst abap_true iv_bwtar
+                            CHANGING lv_d3 lv_y3 lv_msg lv_id lv_no lv_ty.
+  IF lv_d3 IS NOT INITIAL.
+    PERFORM f_commit CHANGING lv_cerr lv_cmsg.
+    IF lv_cerr = abap_true.
+      CLEAR lv_d3.
+      lv_id = gc_msgid. lv_no = '022'. lv_ty = 'E'.
+      lv_msg = |update failed: { lv_cmsg }|.
+    ENDIF.
+  ENDIF.
+
+  IF lv_d3 IS INITIAL.
+    cv_part = abap_true.
+    cv_id = lv_id. cv_no = lv_no. cv_ty = 'W'.
+    cv_msg = |{ lv_out } { lv_d1 } and 301 { lv_d2 } posted; { lv_in } in plant { p_wdst } | &&
+             |failed: { lv_msg } - stock is unrestricted in plant { p_wdst }, post { lv_in } manually|.
+    APPEND VALUE #( bwart = lv_in status = gc_st_warn msgid = lv_id msgno = lv_no msgty = 'W'
+                    message = |{ lv_in } in plant { p_wdst } failed: { lv_msg } - stock is | &&
+                              |unrestricted in plant { p_wdst }, post { lv_in } manually| ) TO ct_steps.
+  ELSE.
+    cv_msg = |{ lv_out } { lv_d1 } / 301 { lv_d2 } / { lv_in } { lv_d3 } ({ lv_y2 })|.
+    APPEND VALUE #( bwart = lv_in status = gc_st_ok mblnr = lv_d3 mjahr = lv_y3
+                    message = |{ lv_in } document { lv_d3 }/{ lv_y3 }: unrestricted to | &&
+                              |{ gv_move_txt } in plant { p_wdst }| ) TO ct_steps.
+  ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_POST_STOCK_TYPE                                 [v1.0]
+*&      Stock-type change inside one plant (343 / 344 / 321 / 322), one
+*&      item per storage location of the allocation: the issuing storage
+*&      location in the source plant, the receiving one (ZPTP_SLOC_MAP) in
+*&      the target plant. In the target plant the item carries the target
+*&      valuation type. No commit here; simulation runs with TESTRUN.
+*&---------------------------------------------------------------------*
+FORM f_post_stock_type USING is_raw    TYPE gty_input_raw
+                             it_alloc  TYPE gtt_alloc
+                             iv_bwart  TYPE bwart
+                             iv_werks  TYPE werks_d
+                             iv_target TYPE abap_bool
+                             iv_bwtar  TYPE bwtar_d
+                       CHANGING cv_mblnr TYPE mblnr
+                                cv_mjahr TYPE mjahr
+                                cv_msg   TYPE bapi_msg
+                                cv_id    TYPE symsgid
+                                cv_no    TYPE symsgno
+                                cv_ty    TYPE symsgty.
+
+  DATA: ls_head  TYPE bapi2017_gm_head_01,
+        ls_code  TYPE bapi2017_gm_code,
+        lt_item  TYPE STANDARD TABLE OF bapi2017_gm_item_create,
+        ls_item  TYPE bapi2017_gm_item_create,
+        ls_alloc TYPE gty_alloc,
+        lt_ret   TYPE STANDARD TABLE OF bapiret2,
+        ls_ret   TYPE bapiret2,
+        lv_doc   TYPE bapi2017_gm_head_ret-mat_doc,
+        lv_year  TYPE bapi2017_gm_head_ret-doc_year.
+
+  CLEAR: cv_mblnr, cv_mjahr, cv_msg, cv_id, cv_no, cv_ty.
+
+  ls_head-pstng_date = p_budat.
+  ls_head-doc_date   = sy-datum.
+  ls_head-header_txt = 'HBM Split Val'.
+  ls_code-gm_code    = gc_gm_code.
+
+  LOOP AT it_alloc INTO ls_alloc.
+    CLEAR ls_item.
+    ls_item-material  = is_raw-matnr.
+    ls_item-plant     = iv_werks.
+    ls_item-stge_loc  = COND #( WHEN iv_target = abap_true THEN ls_alloc-lgort_dst
+                                                            ELSE ls_alloc-lgort ).
+    ls_item-move_type = iv_bwart.
+    ls_item-entry_qnt = ls_alloc-menge.
+    ls_item-entry_uom = is_raw-meins.
+    ls_item-val_type  = iv_bwtar.            " target plant only, blank otherwise
+    IF is_raw-charg IS NOT INITIAL AND is_raw-nobat = abap_false.
+      ls_item-batch = is_raw-charg.
+    ENDIF.
+    APPEND ls_item TO lt_item.
+  ENDLOOP.
+
+  IF lt_item IS INITIAL.
+    cv_msg = 'No storage location allocated - nothing posted'.
+    RETURN.
+  ENDIF.
+
+  CALL FUNCTION 'BAPI_GOODSMVT_CREATE'
+    EXPORTING goodsmvt_header  = ls_head
+              goodsmvt_code    = ls_code
+              testrun          = p_test
+    IMPORTING materialdocument = lv_doc
+              matdocumentyear  = lv_year
+    TABLES    goodsmvt_item    = lt_item
+              return           = lt_ret.
+
+  READ TABLE lt_ret INTO ls_ret WITH KEY type = 'E'.
+  IF sy-subrc <> 0.
+    READ TABLE lt_ret INTO ls_ret WITH KEY type = 'A'.
+  ENDIF.
+  IF sy-subrc = 0.
+    CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+    cv_id = ls_ret-id. cv_no = ls_ret-number. cv_ty = ls_ret-type.
+    cv_msg = ls_ret-message.
+  ELSEIF p_test = abap_true.
+    CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+    cv_mblnr = 'SIMULATED'.
+    cv_mjahr = p_budat(4).
+  ELSE.
+    cv_mblnr = lv_doc.
+    cv_mjahr = lv_year.
+  ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_COMMIT                                          [v1.0]
+*&      Synchronous commit of one posting (transfer modes 2 / 3), so that
+*&      the next movement finds the stock. Reports an update failure.
+*&---------------------------------------------------------------------*
+FORM f_commit CHANGING cv_err TYPE abap_bool
+                       cv_msg TYPE bapi_msg.
+  DATA ls_ret TYPE bapiret2.
+  CLEAR: cv_err, cv_msg.
+  CALL FUNCTION 'BAPI_TRANSACTION_COMMIT'
+    EXPORTING wait   = abap_true
+    IMPORTING return = ls_ret.
+  IF ls_ret-type CA 'EA'.
+    cv_err = abap_true.
+    cv_msg = ls_ret-message.
+  ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
 *&      Form  F_POST_301   (3.6 BAPI_GOODSMVT_CREATE)
 *&      One material document per input line, one ITEM per issuing
 *&      storage location. STGE_LOC = issuing location from the
@@ -2697,7 +3311,10 @@ FORM f_add_log USING iv_id  TYPE symsgid
   ls_log-werks_dst = p_wdst.
   ls_log-lgort_src = cs_out-lgort_src.
   ls_log-lgort_dst = cs_out-lgort_dst.
-  ls_log-bwart     = gc_mov_type.
+  IF cs_out-bwart IS INITIAL.                                 " [v1.1]
+    cs_out-bwart = gc_mov_type.
+  ENDIF.
+  ls_log-bwart     = cs_out-bwart.
   ls_log-budat     = p_budat.
   ls_log-menge     = COND #( WHEN cs_out-menge_post IS NOT INITIAL
                              THEN cs_out-menge_post ELSE cs_out-qty_input ).
@@ -2861,6 +3478,7 @@ FORM f_display_alv.
   add_col 'QTY_INPUT'  'File Qty'.
   add_col 'QTY_SAP'    'SAP Stock'.
   add_col 'VARIANCE'   'Variance'.
+  add_col 'BWART'      'Mvt type'.
   add_col 'MBLNR'      'Mat.Doc'.
   add_col 'MJAHR'      'Year'.
   add_col 'MSGTY'      'Msg Type'.
