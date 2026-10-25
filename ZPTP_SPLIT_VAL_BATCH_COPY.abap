@@ -1,21 +1,23 @@
-n*&---------------------------------------------------------------------*
+*&---------------------------------------------------------------------*
 *& Report  ZPTP_SPLIT_VAL_BATCH_COPY
 *&---------------------------------------------------------------------*
 *& Project : HBM - Split Valuation migration
 *& Scope   : Copy of batch master data from the source plant to the
 *&           target plant, enriched with the valuation type of a file
-*& Version : v0.1
+*& Version : v0.5
 *& Package : ZPTP_SPLIT_VAL
 *&
 *&---------------------------------------------------------------------*
 *& Description
 *&---------------------------------------------------------------------*
-*& Reads an Excel file (.xlsx) made of one header row and several item
-*& rows:
+*& Reads a CSV file (separator ';', UTF-8 or Windows-1252) made of one
+*& header line and several item lines:            [v0.3, was .xlsx]
 *&
-*&     column A  material number
-*&     column B  batch
-*&     column C  valuation type
+*&     MATERIAL;BATCH;VALUATION TYPE
+*&
+*&     field 1  material number
+*&     field 2  batch
+*&     field 3  valuation type
 *&
 *& For every item the report reads the batch data at plant level in the
 *& source plant (default 8P01, BAPI_BATCH_GET_DETAIL) and creates the
@@ -28,23 +30,36 @@ n*&---------------------------------------------------------------------*
 *&   - the material is extended to both plants and is batch-managed in
 *&     both (MARC-XCHPF or MARA-XCHPF);
 *&   - the valuation type exists in the target plant (MBEW-BWTAR);
-*&   - the source batch exists in the source plant;
+*&   - the source batch exists in the source plant (MCHA, checked before
+*&     any creation); a numeric batch whose leading zeros were lost (CSV
+*&     saved from Excel) is completed with zeros when that batch exists
+*&     [v0.4];
 *&   - a batch already existing in the target plant is not recreated:
 *&     status S if its valuation type is the one of the file, E if not
 *&     (a batch carries one valuation type);
 *&   - the same Material + Batch twice in the file with two different
 *&     valuation types: every occurrence is rejected.
 *&
-*& Test run (P_TEST, default on): all checks run, no batch is created.
-*& The file is read from the PC (dialog) or from the application server
-*& (dialog and background). Result: ALV list, no database log.
+*& Run modes (v0.2):
+*&   - Online (P_ONL, default): the file is read and checked, then the
+*&     ALV lists every item. A double-click on one item asks for
+*&     confirmation and creates that batch (BAPI_BATCH_CREATE + commit).
+*&     The line turns green when the batch is created (or already exists
+*&     with the same valuation type), red on an error. Lines rejected by
+*&     the checks are red from the start. P_TEST does not apply.
+*&   - Background (P_BGD): every item is processed in one run, as in v0.1;
+*&     P_TEST (default on) runs all checks without creating anything. Can
+*&     run as a job (SM36) with a file on the application server.
+*& The file is read from the PC (dialog only) or from the application
+*& server. Result: ALV list (spool in a job), no database log.
 *&
 *&---------------------------------------------------------------------*
 *& Assumptions
 *&---------------------------------------------------------------------*
-*& - The first worksheet is read; line 1 is the header and is skipped.
-*& - Material number and batch cells are formatted as text in Excel
-*&   (leading zeros, numeric-looking batches are not altered).
+*& - Line 1 is the header and is skipped. Fields after the third are
+*&   ignored.
+*& - When the file is prepared in Excel, the material and batch columns
+*&   are formatted as text before saving as CSV (leading zeros kept).
 *& - Valuation level = plant (MBEW-BWKEY = target plant).
 *& - Classification of the batch is not copied (as in ZPTP_SPLIT_VAL_MIG).
 *&
@@ -61,7 +76,9 @@ CONSTANTS:
   gc_st_ok   TYPE c VALUE 'S',      " batch created / already in target plant
   gc_st_err  TYPE c VALUE 'E',
   gc_st_test TYPE c VALUE 'T',      " simulation, not created
-  gc_xchpf   TYPE xchpf VALUE 'X'.
+  gc_st_open TYPE c VALUE ' ',      " online: ready, not processed yet [v0.2]
+  gc_xchpf   TYPE xchpf VALUE 'X',
+  gc_sep     TYPE c VALUE ';'.         " field separator of the CSV file [v0.3]
 
 TYPES: BEGIN OF gty_item,
          line  TYPE i,
@@ -70,6 +87,7 @@ TYPES: BEGIN OF gty_item,
          bwtar TYPE bwtar_d,
          bad   TYPE abap_bool,
          msg   TYPE bapi_msg,
+         note  TYPE bapi_msg,            " information, e.g. batch completed [v0.4]
        END OF gty_item,
        gtt_item TYPE STANDARD TABLE OF gty_item WITH DEFAULT KEY.
 
@@ -80,6 +98,9 @@ TYPES: BEGIN OF gty_out,
          charg   TYPE charg_d,
          bwtar   TYPE bwtar_d,
          message TYPE bapi_msg,
+         rowcolor TYPE c LENGTH 4,       " ALV row colour [v0.2]
+         stattx   TYPE c LENGTH 20,      " status in words, ALV grouping [v0.5]
+         sort_key TYPE c LENGTH 1,       " display order of the status, hidden [v0.5]
        END OF gty_out,
        gtt_out TYPE STANDARD TABLE OF gty_out WITH DEFAULT KEY.
 
@@ -92,25 +113,39 @@ TYPES: BEGIN OF gty_marc,
 
 DATA: gt_item TYPE gtt_item,
       gt_out  TYPE gtt_out,
-      gt_marc TYPE gtt_marc.
+      gt_marc TYPE gtt_marc,
+      gv_sim  TYPE abap_bool.          " simulation: background mode with P_TEST [v0.2]
 
 *&---------------------------------------------------------------------*
 *&  Selection screen
 *&---------------------------------------------------------------------*
 SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-b01.
-  PARAMETERS: p_wsrc TYPE werks_d OBLIGATORY DEFAULT '8P01',       " source plant
-              p_wdst TYPE werks_d OBLIGATORY DEFAULT '8Q01'.       " target plant
+* not OBLIGATORY: a required field left empty locks the screen at the
+* first radio-button click; checked on execution in F_CHECK_SCREEN [v0.2]
+  PARAMETERS: p_wsrc TYPE werks_d DEFAULT '8P01',                  " source plant
+              p_wdst TYPE werks_d DEFAULT '8Q01'.                  " target plant
 SELECTION-SCREEN END OF BLOCK b1.
 
 SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE TEXT-b02.
   PARAMETERS: p_loc TYPE abap_bool RADIOBUTTON GROUP src DEFAULT 'X' USER-COMMAND src, " PC
               p_srv TYPE abap_bool RADIOBUTTON GROUP src.                              " server
-  PARAMETERS: p_file TYPE string LOWER CASE OBLIGATORY.
+  PARAMETERS: p_file TYPE string LOWER CASE.                       " checked on execution [v0.2]
 SELECTION-SCREEN END OF BLOCK b2.
 
 SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE TEXT-b03.
-  PARAMETERS: p_test TYPE abap_bool AS CHECKBOX DEFAULT 'X'.       " simulation
+  PARAMETERS: p_onl  RADIOBUTTON GROUP run DEFAULT 'X' USER-COMMAND run, " online, item by item [v0.2]
+              p_bgd  RADIOBUTTON GROUP run.                              " background, all items
+  PARAMETERS: p_test TYPE abap_bool AS CHECKBOX DEFAULT 'X' MODIF ID tst. " simulation (background)
 SELECTION-SCREEN END OF BLOCK b3.
+
+* P_TEST only applies to the background mode                  [v0.2]
+AT SELECTION-SCREEN OUTPUT.
+  LOOP AT SCREEN.
+    IF screen-group1 = 'TST'.
+      screen-input = COND #( WHEN p_onl = abap_true THEN '0' ELSE '1' ).
+      MODIFY SCREEN.
+    ENDIF.
+  ENDLOOP.
 
 AT SELECTION-SCREEN ON VALUE-REQUEST FOR p_file.
   PERFORM f_f4_file.
@@ -119,30 +154,88 @@ AT SELECTION-SCREEN.
   PERFORM f_check_screen.
 
 START-OF-SELECTION.
+* the online mode needs a user in front of the ALV            [v0.2]
+  IF p_onl = abap_true AND sy-batch = abap_true.
+    MESSAGE 'The online mode cannot run in background - choose Background' TYPE 'E'.
+  ENDIF.
+  gv_sim = xsdbool( p_bgd = abap_true AND p_test = abap_true ).
   PERFORM f_read_file.
   PERFORM f_read_marc.
   PERFORM f_check_items.
-  PERFORM f_process_items.
+  IF p_onl = abap_true.
+    PERFORM f_prepare_online.
+  ELSE.
+    PERFORM f_process_items.
+  ENDIF.
 
 END-OF-SELECTION.
   PERFORM f_display_alv.
 
 *&---------------------------------------------------------------------*
 FORM f_f4_file.
-  DATA: lt_ftab TYPE filetable,
-        lv_rc   TYPE i,
-        lv_usr  TYPE i.
-  IF p_srv = abap_true.
-    RETURN.                              " type the server path
+* PC: Windows file dialog (CSV and text files, or any file).
+* Application server: server directory browser.               [v0.3]
+  DATA: lt_ftab    TYPE filetable,
+        lv_rc      TYPE i,
+        lv_usr     TYPE i,
+        lt_dynp    TYPE STANDARD TABLE OF dynpread,
+        lv_srvpath TYPE dxfields-longpath,
+        lv_srvfile TYPE dxfields-longpath.
+
+* the radio buttons may have been changed without a screen round trip:
+* read their current value from the screen
+  lt_dynp = VALUE #( ( fieldname = 'P_LOC' ) ( fieldname = 'P_SRV' ) ).
+  CALL FUNCTION 'DYNP_VALUES_READ'
+    EXPORTING  dyname     = sy-repid
+               dynumb     = sy-dynnr
+    TABLES     dynpfields = lt_dynp
+    EXCEPTIONS OTHERS     = 1.
+  IF sy-subrc = 0.
+    READ TABLE lt_dynp INTO DATA(ls_dynp) WITH KEY fieldname = 'P_SRV'.
+    IF sy-subrc = 0.
+      p_srv = ls_dynp-fieldvalue.
+      p_loc = xsdbool( p_srv <> abap_true ).
+    ENDIF.
   ENDIF.
+
+  IF p_srv = abap_true.
+*   P_FILE is a string: pass a DXFIELDS-LONGPATH copy (typed parameter)
+    lv_srvpath = p_file.
+    CALL FUNCTION 'F4_DXFILENAME_TOPRECURSION'
+      EXPORTING  i_location_flag = 'A'              " application server
+                 i_server        = ' '
+                 i_path          = lv_srvpath
+                 filemask        = '*.*'
+                 fileoperation   = 'R'
+      IMPORTING  o_path          = lv_srvfile
+      EXCEPTIONS rfc_error       = 1
+                 error_with_gui  = 2
+                 OTHERS          = 3.
+    IF sy-subrc = 0 AND lv_srvfile IS NOT INITIAL.
+      p_file = lv_srvfile.
+    ENDIF.
+    RETURN.
+  ENDIF.
+
   cl_gui_frontend_services=>file_open_dialog(
-    EXPORTING window_title = 'Select the Excel file'
-              file_filter  = 'Excel (*.xlsx)|*.xlsx'
-    CHANGING  file_table   = lt_ftab
-              rc           = lv_rc
-              user_action  = lv_usr
-    EXCEPTIONS OTHERS      = 1 ).
-  IF sy-subrc = 0 AND lv_usr = cl_gui_frontend_services=>action_ok.
+    EXPORTING  window_title            = 'Select the CSV file'
+*              no filter: every file of the folder is listed, whatever
+*              its extension (.csv, .txt, .CSV ...)                   [v0.3]
+               multiselection          = abap_false
+    CHANGING   file_table              = lt_ftab
+               rc                      = lv_rc
+               user_action             = lv_usr
+    EXCEPTIONS file_open_dialog_failed = 1
+               cntl_error              = 2
+               error_no_gui            = 3
+               not_supported_by_gui    = 4
+               OTHERS                  = 5 ).
+  IF sy-subrc <> 0.
+    MESSAGE |The file dialog could not be opened (return code { sy-subrc })| TYPE 'S'
+            DISPLAY LIKE 'E'.
+    RETURN.
+  ENDIF.
+  IF lv_usr = cl_gui_frontend_services=>action_ok.
     READ TABLE lt_ftab INDEX 1 INTO DATA(ls_ftab).
     IF sy-subrc = 0.
       p_file = ls_ftab-filename.
@@ -153,6 +246,19 @@ ENDFORM.
 *&---------------------------------------------------------------------*
 FORM f_check_screen.
   CHECK sy-ucomm = 'ONLI' OR sy-ucomm = 'SJOB' OR sy-ucomm = 'PRIN'.
+* a job has no SAP GUI: no PC file, no online mode            [v0.2]
+  IF sy-ucomm = 'SJOB' AND p_loc = abap_true.
+    MESSAGE 'A background job cannot read a PC file - choose Application server' TYPE 'E'.
+  ENDIF.
+  IF sy-ucomm = 'SJOB' AND p_onl = abap_true.
+    MESSAGE 'A background job needs the Background run mode' TYPE 'E'.
+  ENDIF.
+  IF p_wsrc IS INITIAL OR p_wdst IS INITIAL.
+    MESSAGE 'Source and target plant are required' TYPE 'E'.
+  ENDIF.
+  IF p_file IS INITIAL.
+    MESSAGE 'Please specify the CSV file path' TYPE 'E'.
+  ENDIF.
   IF p_wsrc = p_wdst.
     MESSAGE 'Source and target plant must be different' TYPE 'E'.
   ENDIF.
@@ -167,7 +273,7 @@ FORM f_check_screen.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*&      Form  F_READ_FILE   (xlsx from PC or application server)
+*&      Form  F_READ_FILE   (CSV from PC or application server)
 *&---------------------------------------------------------------------*
 FORM f_read_file.
 
@@ -175,17 +281,15 @@ FORM f_read_file.
         lv_len   TYPE i,
         lv_xstr  TYPE xstring,
         lv_chunk TYPE x255,
-        lo_xl    TYPE REF TO cl_fdt_xl_spreadsheet,
-        lt_names TYPE if_fdt_doc_spreadsheet=>t_worksheet_names,
-        lo_data  TYPE REF TO data,
+        lv_text  TYPE string,
+        lt_lines TYPE string_table,
+        lv_line  TYPE string,
+        lt_field TYPE string_table,
         ls_item  TYPE gty_item,
         lv_matnr TYPE string,
         lv_charg TYPE string,
         lv_bwtar TYPE string,
         lv_row   TYPE i.
-  FIELD-SYMBOLS: <lt_data> TYPE STANDARD TABLE,
-                 <ls_row>  TYPE any,
-                 <lv_cell> TYPE any.
 
 * --- file content as xstring ------------------------------------------
   IF p_srv = abap_true.
@@ -224,35 +328,38 @@ FORM f_read_file.
     MESSAGE |File { p_file } is empty| TYPE 'E'.
   ENDIF.
 
-* --- first worksheet ----------------------------------------------------
+* --- decode: UTF-8 first, then Windows-1252 (older Excel "CSV")  [v0.3]
   TRY.
-      lo_xl = NEW cl_fdt_xl_spreadsheet( document_name = p_file
-                                         xdocument     = lv_xstr ).
-      lo_xl->if_fdt_doc_spreadsheet~get_worksheet_names(
-        IMPORTING worksheet_names = lt_names ).
-      READ TABLE lt_names INDEX 1 INTO DATA(lv_sheet).
-      IF sy-subrc <> 0.
-        MESSAGE 'The Excel file has no worksheet' TYPE 'E'.
-      ENDIF.
-      lo_data = lo_xl->if_fdt_doc_spreadsheet~get_itab_from_worksheet( lv_sheet ).
-    CATCH cx_fdt_excel_core INTO DATA(lx_xl).
-      MESSAGE |Cannot read the Excel file (.xlsx expected): { lx_xl->get_text( ) }| TYPE 'E'.
+      cl_abap_conv_in_ce=>create( encoding    = 'UTF-8'
+                                  ignore_cerr = abap_false
+                                  input       = lv_xstr )->read( IMPORTING data = lv_text ).
+    CATCH cx_root.
+      TRY.
+          cl_abap_conv_in_ce=>create( encoding    = '1160'
+                                      ignore_cerr = abap_true
+                                      input       = lv_xstr )->read( IMPORTING data = lv_text ).
+        CATCH cx_root.
+          MESSAGE |Cannot decode file { p_file }| TYPE 'E'.
+      ENDTRY.
   ENDTRY.
-  ASSIGN lo_data->* TO <lt_data>.
+  IF lv_text IS NOT INITIAL AND lv_text(1) = cl_abap_conv_in_ce=>uccp( 'FEFF' ).
+    lv_text = lv_text+1.                                " byte order mark
+  ENDIF.
+  REPLACE ALL OCCURRENCES OF cl_abap_char_utilities=>cr_lf
+          IN lv_text WITH cl_abap_char_utilities=>newline.
+  SPLIT lv_text AT cl_abap_char_utilities=>newline INTO TABLE lt_lines.
 
-* --- items: row 1 = header ----------------------------------------------
-  LOOP AT <lt_data> ASSIGNING <ls_row>.
+* --- items: line 1 = header; MATERIAL;BATCH;VALUATION TYPE ----------
+  LOOP AT lt_lines INTO lv_line.
     lv_row = sy-tabix.
     IF lv_row = 1.
       CONTINUE.
     ENDIF.
-    CLEAR: ls_item, lv_matnr, lv_charg, lv_bwtar.
-    ASSIGN COMPONENT 1 OF STRUCTURE <ls_row> TO <lv_cell>.
-    IF sy-subrc = 0. lv_matnr = <lv_cell>. ENDIF.
-    ASSIGN COMPONENT 2 OF STRUCTURE <ls_row> TO <lv_cell>.
-    IF sy-subrc = 0. lv_charg = <lv_cell>. ENDIF.
-    ASSIGN COMPONENT 3 OF STRUCTURE <ls_row> TO <lv_cell>.
-    IF sy-subrc = 0. lv_bwtar = <lv_cell>. ENDIF.
+    CLEAR: ls_item, lv_matnr, lv_charg, lv_bwtar, lt_field.
+    SPLIT lv_line AT gc_sep INTO TABLE lt_field.
+    READ TABLE lt_field INDEX 1 INTO lv_matnr.
+    READ TABLE lt_field INDEX 2 INTO lv_charg.
+    READ TABLE lt_field INDEX 3 INTO lv_bwtar.
     CONDENSE: lv_matnr, lv_charg, lv_bwtar.
     IF lv_matnr IS INITIAL AND lv_charg IS INITIAL AND lv_bwtar IS INITIAL.
       CONTINUE.                           " empty row
@@ -321,6 +428,11 @@ FORM f_check_items.
         ls_dst   TYPE gty_marc,
         ls_prev  TYPE lty_key.
 
+* --- source batch exists in the source plant (MCHA)              [v0.4]
+* runs first: a batch completed with leading zeros changes the key used
+* by the next checks
+  PERFORM f_check_source_batch.
+
 * --- several valuation types for one batch ----------------------------
   LOOP AT gt_item INTO DATA(ls_i) WHERE bad = abap_false
                                     AND matnr IS NOT INITIAL AND charg IS NOT INITIAL.
@@ -387,6 +499,54 @@ FORM f_check_items.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
+*&      Form  F_CHECK_SOURCE_BATCH                              [v0.4]
+*&      The batch of the file must exist in the source plant, otherwise
+*&      BAPI_BATCH_GET_DETAIL fails at creation. A numeric batch without
+*&      its leading zeros (lost when the CSV is saved from Excel) is
+*&      completed to 10 characters when that batch exists.
+*&---------------------------------------------------------------------*
+FORM f_check_source_batch.
+  DATA: lv_full TYPE charg_d,
+        lv_x    TYPE charg_d.
+
+  LOOP AT gt_item ASSIGNING FIELD-SYMBOL(<ls_item>)
+       WHERE bad = abap_false AND matnr IS NOT INITIAL AND charg IS NOT INITIAL.
+
+    SELECT SINGLE charg FROM mcha INTO @lv_x
+      WHERE matnr = @<ls_item>-matnr
+        AND werks = @p_wsrc
+        AND charg = @<ls_item>-charg.
+    IF sy-subrc = 0.
+      CONTINUE.
+    ENDIF.
+
+*   numeric batch shorter than 10 characters: try with leading zeros
+    CLEAR lv_full.
+    IF <ls_item>-charg CO '0123456789 ' AND strlen( <ls_item>-charg ) < 10.
+      lv_full = <ls_item>-charg.
+      SHIFT lv_full RIGHT DELETING TRAILING space.
+      OVERLAY lv_full WITH '0000000000'.
+      SELECT SINGLE charg FROM mcha INTO @lv_x
+        WHERE matnr = @<ls_item>-matnr
+          AND werks = @p_wsrc
+          AND charg = @lv_full.
+      IF sy-subrc = 0.
+        <ls_item>-note  = |batch { <ls_item>-charg } of the file completed to { lv_full }|.
+        <ls_item>-charg = lv_full.
+        CONTINUE.
+      ENDIF.
+    ENDIF.
+
+    <ls_item>-bad = abap_true.
+    <ls_item>-msg = |Batch { <ls_item>-charg } of material { <ls_item>-matnr ALPHA = OUT } | &&
+                    |does not exist in plant { p_wsrc }| &&
+                    |{ COND string( WHEN lv_full IS NOT INITIAL
+                                    THEN | (nor { lv_full })| ) }| &&
+                    | - check the batch number in the file (leading zeros?)|.
+  ENDLOOP.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
 *&      Form  F_PROCESS_ITEMS
 *&---------------------------------------------------------------------*
 FORM f_process_items.
@@ -425,8 +585,135 @@ FORM f_process_items.
            INTO TABLE lt_done.
 
     PERFORM f_copy_batch USING ls_item CHANGING ls_out.
+    IF ls_item-note IS NOT INITIAL.
+      ls_out-message = |{ ls_out-message } ({ ls_item-note })|.
+    ENDIF.
+    PERFORM f_set_color CHANGING ls_out.
     APPEND ls_out TO gt_out.
   ENDLOOP.
+
+  LOOP AT gt_out ASSIGNING FIELD-SYMBOL(<ls_col>) WHERE rowcolor IS INITIAL.
+    PERFORM f_set_color CHANGING <ls_col>.
+  ENDLOOP.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_PREPARE_ONLINE                                  [v0.2]
+*&      Online mode: one ALV row per item, nothing created yet. Items
+*&      rejected by the checks are red; the others wait for a double-click.
+*&---------------------------------------------------------------------*
+FORM f_prepare_online.
+  DATA ls_out TYPE gty_out.
+
+  LOOP AT gt_item INTO DATA(ls_item).
+    CLEAR ls_out.
+    ls_out-line  = ls_item-line.
+    ls_out-matnr = ls_item-matnr.
+    ls_out-charg = ls_item-charg.
+    ls_out-bwtar = ls_item-bwtar.
+    IF ls_item-bad = abap_true.
+      ls_out-status  = gc_st_err.
+      ls_out-message = ls_item-msg.
+    ELSE.
+      ls_out-status  = gc_st_open.
+      ls_out-message = |Ready - double-click to create the batch in plant { p_wdst }|.
+      IF ls_item-note IS NOT INITIAL.
+        ls_out-message = |{ ls_out-message } ({ ls_item-note })|.
+      ENDIF.
+    ENDIF.
+    PERFORM f_set_color CHANGING ls_out.
+    APPEND ls_out TO gt_out.
+  ENDLOOP.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_USER_COMMAND                                    [v0.2]
+*&      ALV callback, online mode. Double-click (&IC1) on one item:
+*&      confirmation, batch creation and commit, then the row is
+*&      refreshed in place - green on success, red on error.
+*&---------------------------------------------------------------------*
+FORM f_user_command USING r_ucomm     TYPE sy-ucomm
+                          rs_selfield TYPE slis_selfield.
+  DATA: ls_item   TYPE gty_item,
+        lv_answer TYPE c,
+        lv_disp   TYPE c.
+
+  CHECK p_onl = abap_true AND r_ucomm = '&IC1'.
+
+  READ TABLE gt_out ASSIGNING FIELD-SYMBOL(<ls_out>) INDEX rs_selfield-tabindex.
+  IF sy-subrc <> 0.
+    RETURN.
+  ENDIF.
+
+  CASE <ls_out>-status.
+    WHEN gc_st_ok.
+      MESSAGE |Batch { <ls_out>-charg } is already in plant { p_wdst }| TYPE 'S'.
+      RETURN.
+    WHEN gc_st_err.
+*     a line rejected by the file checks cannot be created; a line that
+*     failed at creation can be tried again
+      READ TABLE gt_item INTO ls_item WITH KEY line = <ls_out>-line.
+      IF sy-subrc = 0 AND ls_item-bad = abap_true.
+        MESSAGE |Line { <ls_out>-line } cannot be created: { ls_item-msg }| TYPE 'S'
+                DISPLAY LIKE 'E'.
+        RETURN.
+      ENDIF.
+  ENDCASE.
+
+  CALL FUNCTION 'POPUP_TO_CONFIRM'
+    EXPORTING
+      titlebar       = 'Create batch'
+      text_question  = |Create batch { <ls_out>-charg } of material { <ls_out>-matnr ALPHA = OUT } | &&
+                       |in plant { p_wdst } with valuation type { <ls_out>-bwtar }?|
+      text_button_1  = 'Create'
+      text_button_2  = 'Cancel'
+      default_button = '1'
+    IMPORTING
+      answer         = lv_answer.
+  IF lv_answer <> '1'.
+    RETURN.
+  ENDIF.
+
+  READ TABLE gt_item INTO ls_item WITH KEY line = <ls_out>-line.
+  IF sy-subrc <> 0.
+    RETURN.
+  ENDIF.
+  PERFORM f_copy_batch USING ls_item CHANGING <ls_out>.
+  IF ls_item-note IS NOT INITIAL.
+    <ls_out>-message = |{ <ls_out>-message } ({ ls_item-note })|.
+  ENDIF.
+  PERFORM f_set_color CHANGING <ls_out>.
+
+  lv_disp = COND #( WHEN <ls_out>-status = gc_st_err THEN 'E' ELSE 'S' ).
+  MESSAGE <ls_out>-message TYPE 'S' DISPLAY LIKE lv_disp.
+  rs_selfield-refresh    = abap_true.
+  rs_selfield-row_stable = abap_true.
+  rs_selfield-col_stable = abap_true.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_SET_COLOR                                       [v0.2]
+*&      Row colour: green = created or already there, red = error,
+*&      yellow = simulated, none = waiting (online).
+*&---------------------------------------------------------------------*
+FORM f_set_color CHANGING cs_out TYPE gty_out.
+  cs_out-rowcolor = SWITCH #( cs_out-status
+                              WHEN gc_st_ok   THEN 'C510'
+                              WHEN gc_st_err  THEN 'C610'
+                              WHEN gc_st_test THEN 'C310'
+                              ELSE space ).
+* grouping of the ALV: ready first (online), then simulated, created,
+* errors                                                       [v0.5]
+  cs_out-stattx   = SWITCH #( cs_out-status
+                              WHEN gc_st_ok   THEN 'Created / exists'
+                              WHEN gc_st_err  THEN 'Error'
+                              WHEN gc_st_test THEN 'Simulated'
+                              ELSE 'Ready' ).
+  cs_out-sort_key = SWITCH #( cs_out-status
+                              WHEN gc_st_test THEN '2'
+                              WHEN gc_st_ok   THEN '3'
+                              WHEN gc_st_err  THEN '4'
+                              ELSE '1' ).
 ENDFORM.
 
 *&---------------------------------------------------------------------*
@@ -483,7 +770,7 @@ FORM f_copy_batch USING is_item TYPE gty_item
 * --- enrichment with the valuation type of the file -----------------------
   ls_att-val_type = is_item-bwtar.
 
-  IF p_test = abap_true.
+  IF gv_sim = abap_true.
     cs_out-status  = gc_st_test.
     cs_out-message = |Simulation: batch would be created in plant { p_wdst } | &&
                      |with valuation type { is_item-bwtar }|.
@@ -516,6 +803,7 @@ ENDFORM.
 FORM f_display_alv.
   DATA: lt_fcat TYPE slis_t_fieldcat_alv,
         ls_fcat TYPE slis_fieldcat_alv,
+        lt_sort TYPE slis_t_sortinfo_alv,
         ls_lay  TYPE slis_layout_alv.
 
   DEFINE add_col.
@@ -524,21 +812,38 @@ FORM f_display_alv.
     ls_fcat-seltext_m = &2. ls_fcat-seltext_s = &2.
     APPEND ls_fcat TO lt_fcat.
   END-OF-DEFINITION.
-  add_col 'STATUS'  'Status'.
+  add_col 'STATTX'  'Status'.
+  add_col 'STATUS'  'St'.
   add_col 'LINE'    'File line'.
   add_col 'MATNR'   'Material'.
   add_col 'CHARG'   'Batch'.
   add_col 'BWTAR'   'Val.Type'.
   add_col 'MESSAGE' 'Message'.
+* technical sort key, not displayed                            [v0.5]
+  add_col 'SORT_KEY' 'Sort'.
+  ls_fcat-no_out = abap_true.
+  MODIFY lt_fcat FROM ls_fcat INDEX lines( lt_fcat ).
+  lt_sort = VALUE #( ( spos = 1 fieldname = 'SORT_KEY' up = abap_true )
+                     ( spos = 2 fieldname = 'STATTX'   up = abap_true group = 'UL' )
+                     ( spos = 3 fieldname = 'LINE'     up = abap_true ) ).
 
-  IF p_test = abap_true.
+  IF gv_sim = abap_true.
     MESSAGE 'SIMULATION - no batch created' TYPE 'S'.
   ENDIF.
   ls_lay-colwidth_optimize = abap_true.
-  ls_lay-zebra = abap_true.
+  ls_lay-info_fieldname    = 'ROWCOLOR'.                       " [v0.2]
+  DATA(lv_title) = CONV lvc_title( COND #( WHEN p_onl = abap_true
+                     THEN |Double-click an item to create its batch in plant { p_wdst }|
+                     WHEN gv_sim = abap_true
+                     THEN |Simulation - batches { p_wsrc } -> { p_wdst }|
+                     ELSE |Batches created { p_wsrc } -> { p_wdst }| ) ).
   CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
-    EXPORTING is_layout   = ls_lay
-              it_fieldcat = lt_fcat
-    TABLES    t_outtab    = gt_out
+    EXPORTING i_callback_program      = sy-repid
+              i_callback_user_command = 'F_USER_COMMAND'
+              i_grid_title            = lv_title
+              is_layout               = ls_lay
+              it_fieldcat             = lt_fcat
+              it_sort                 = lt_sort
+    TABLES    t_outtab                = gt_out
     EXCEPTIONS program_error = 1 OTHERS = 2.
 ENDFORM.

@@ -20,7 +20,7 @@ logs every record in `ZPTP_MOV_EXEC` (batch extensions in `ZPTP_BATCH_EXT`).
 | [`HIGH_LEVEL_OVERVIEW.md`](HIGH_LEVEL_OVERVIEW.md) | Non-technical overview: why the program exists and what it does |
 | [`ZPTP_SPLIT_VAL_MIG_UTILITY.abap`](ZPTP_SPLIT_VAL_MIG_UTILITY.abap) | Transaction `ZPTP_SPLIT_VAL_UTIL`. Builds the CSV input file from SAP data |
 | [`ZPTP_SPLIT_VAL_MIG_UPLOAD.abap`](ZPTP_SPLIT_VAL_MIG_UPLOAD.abap) | Transaction `ZPTP_SPLIT_VAL_UPLD`. Copies the input file from the PC to the application server (needed to run the migration as a background job) |
-| [`ZPTP_SPLIT_VAL_BATCH_COPY.abap`](ZPTP_SPLIT_VAL_BATCH_COPY.abap) | Transaction `ZPTP_SPLIT_VAL_BCPY`. Reads an Excel file (material; batch; valuation type) and copies the batch data of plant 8P01 to plant 8Q01, enriched with the valuation type |
+| [`ZPTP_SPLIT_VAL_BATCH_COPY.abap`](ZPTP_SPLIT_VAL_BATCH_COPY.abap) | Transaction `ZPTP_SPLIT_VAL_BCPY`. Reads a CSV file separated by ";" (material; batch; valuation type) and copies the batch data of plant 8P01 to plant 8Q01, enriched with the valuation type |
 | *(SAP)* Area menu `ZPTP_SVAL_MENU` | Menu of the transactions `ZPTP_SPLIT_VAL_MIG`, `ZPTP_SPLIT_VAL_BCPY`, `ZPTP_SPLIT_VAL_UPLD`, `ZPTP_SPLIT_VAL_UTIL` (and of the reservation transactions of another development) |
 | `SAP ABAP Development Standard and Namimg Conventions.docx` | Sysmex D-Project ABAP Development Standards & Naming Conventions v1.2, which the object names follow |
 

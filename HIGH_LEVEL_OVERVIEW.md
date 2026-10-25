@@ -108,7 +108,7 @@ All four programs are reachable from the area menu `ZPTP_SVAL_MENU` (folder *Man
 
 - `ZPTP_SPLIT_VAL_MIG_UTILITY` (transaction `ZPTP_SPLIT_VAL_UTIL`) builds the input file from SAP data.
 - `ZPTP_SPLIT_VAL_MIG_UPLOAD` (transaction `ZPTP_SPLIT_VAL_UPLD`) copies a PC file to the application server, so that the migration can run as a background job.
-- `ZPTP_SPLIT_VAL_BATCH_COPY` (transaction `ZPTP_SPLIT_VAL_BCPY`) reads an Excel file (material, batch, valuation type) and copies the batch data from the source plant to the target plant, adding the valuation type of the file.
+- `ZPTP_SPLIT_VAL_BATCH_COPY` (transaction `ZPTP_SPLIT_VAL_BCPY`) reads a CSV file separated by ";" (material, batch, valuation type) and copies the batch data from the source plant to the target plant, adding the valuation type of the file.
 
 ---
 
