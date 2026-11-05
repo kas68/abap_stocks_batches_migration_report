@@ -3,7 +3,7 @@
 *&---------------------------------------------------------------------*
 *& Project : HBM - Split Valuation migration
 *& Scope   : Clearing of batch stocks / Inter-plant transfer
-*& Version : v1.2
+*& Version : v1.6
 *& Package : ZPTP_SPLIT_VAL        Message class: ZPTP_SPLIT_VAL
 *&
 *&---------------------------------------------------------------------*
@@ -98,6 +98,31 @@
 *&     mode, stock scope, quantity check on / off, P_ZBAT, run mode;
 *&   - mode 3: one row per material / batch / storage location whose QI
 *&     stock is partly held by open inspection lots (ZPTP_SPLIT_VAL 055).
+*&
+*& Maximum number of materials (v1.4) - P_MAXMT, 0 = no limit: only
+*&   the first P_MAXMT materials of the run (file order; option 2: stock
+*&   order) are processed, the others are left for a next run. With a
+*&   given RUN_ID, the lines already posted under that RUN_ID (301 rows
+*&   in status S, real run) are skipped first, so that running again with
+*&   the same RUN_ID takes the next materials. One W row (ZPTP_SPLIT_VAL
+*&   056) gives what was processed and what is left.
+*&
+*& Background job (v1.5) - P_JOB: run from the screen with F8, the
+*&   report submits itself with the same selection as a background job
+*&   started immediately (job ZPTP_SPLIT_VAL_MIG), and shows the job
+*&   number and the RUN_ID. The file must be on the application server.
+*&   With P_CLR the logs are emptied in dialog first (confirmation), not
+*&   again in the job. Result: spool of the job (SM37) and ZPTP_MOV_EXEC.
+*&
+*& SAP stock not in the file (v1.6, replaces the I / X reconciliation of
+*&   3.2): a material + batch with stock in the source plant and no line
+*&   in the file is transferred with the SAP stock of the transfer mode,
+*&   with a warning in the message (ZPTP_SPLIT_VAL 010, type W). The
+*&   valuation type is the one the file gives for the other batches of
+*&   the same material (when they all agree), else the first valuation
+*&   type of the material in the target plant; none when the material is
+*&   not split-valuated there. Full Validation Mode, option 1, normal run
+*&   (not on a reprocess-errors run), as the former check.
 *&
 *& Execution strategies (sec.5):
 *&   - Full Validation Mode  : runs all checks 3.2 - 3.5 (default).
@@ -210,6 +235,8 @@ TYPES: BEGIN OF gty_input_raw,
          bad   TYPE abap_bool,   " declaration refused, line blocked
          badno TYPE symsgno,     " message number of the refusal
          badtx TYPE bapi_msg,    " message text of the refusal
+         auto  TYPE abap_bool,   " added from SAP stock, not in the file [v1.6]
+         warn  TYPE bapi_msg,    " warning shown on its rows [v1.6]
        END OF gty_input_raw.
 TYPES: gtt_input_raw TYPE STANDARD TABLE OF gty_input_raw WITH DEFAULT KEY.
 
@@ -338,6 +365,7 @@ TYPES: BEGIN OF gty_out,
          msgno      TYPE symsgno,
          message    TYPE bapi_msg,
          normbat    TYPE abap_bool,   " batch value normalised to blank
+         autowarn   TYPE bapi_msg,    " line added from SAP stock: warning [v1.6]
          sort_key   TYPE c LENGTH 1,  " display order of the status, ALV only
          rowcolor   TYPE c LENGTH 4,  " ALV row colour, ALV only
        END OF gty_out.
@@ -388,6 +416,12 @@ CLASS lcl_help DEFINITION.
       IMPORTING iv_matnr TYPE matnr
                 iv_bwkey TYPE bwkey
       RETURNING VALUE(rv_split) TYPE abap_bool.
+*   First valuation type (ascending) of the material in the valuation
+*   area, blank when none                                   [v1.6]
+    CLASS-METHODS first_bwtar
+      IMPORTING iv_matnr TYPE matnr
+                iv_bwkey TYPE bwkey
+      RETURNING VALUE(rv_bwtar) TYPE bwtar_d.
   PRIVATE SECTION.
     CLASS-DATA: gt_mbew  TYPE gtt_mbew,
                 gv_bwkey TYPE bwkey.
@@ -459,6 +493,28 @@ CLASS lcl_help IMPLEMENTATION.
     rv_split = xsdbool( sy-subrc = 0 AND lv_bwtty IS NOT INITIAL ).
   ENDMETHOD.
 
+  METHOD first_bwtar.
+    DATA ls_mbew TYPE gty_mbew.
+    CLEAR rv_bwtar.
+    IF gv_bwkey IS NOT INITIAL AND iv_bwkey = gv_bwkey.
+*     GT_MBEW is sorted by material and valuation type
+      LOOP AT gt_mbew INTO ls_mbew WHERE matnr = iv_matnr AND bwtar <> space.
+        rv_bwtar = ls_mbew-bwtar.
+        EXIT.
+      ENDLOOP.
+      RETURN.
+    ENDIF.
+    SELECT bwtar FROM mbew INTO TABLE @DATA(lt_bwtar)
+      WHERE matnr = @iv_matnr
+        AND bwkey = @iv_bwkey
+        AND bwtar <> @space.
+    SORT lt_bwtar BY bwtar.
+    READ TABLE lt_bwtar INTO DATA(ls_bwtar) INDEX 1.
+    IF sy-subrc = 0.
+      rv_bwtar = ls_bwtar-bwtar.
+    ENDIF.
+  ENDMETHOD.
+
   METHOD is_in_list.
     DATA: lt_tok TYPE STANDARD TABLE OF string,
           lv_tok TYPE string,
@@ -510,7 +566,8 @@ DATA: gt_input_raw TYPE gtt_input_raw,
       gv_scope_txt TYPE string,                   " label of the stock scope [v0.9]
       gv_xfer      TYPE c,                        " transfer mode [v1.0]
       gv_move_txt  TYPE string,                   " label of the stock moved [v1.0]
-      gv_posnr     TYPE numc06.
+      gv_posnr     TYPE numc06,
+      gv_job       TYPE abap_bool.                " run handed over to a job [v1.5]
 
 * storage locations of the target plant (T001L), buffered once [v0.4-27]
 DATA: gt_lgort_dst TYPE SORTED TABLE OF lgort_d WITH UNIQUE KEY table_line.
@@ -545,10 +602,13 @@ DATA: gv_sel_matnr TYPE matnr,
 * run control, shown first                                  [v1.1]
 SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE TEXT-b03.
   PARAMETERS: p_test  TYPE abap_bool DEFAULT 'X' AS CHECKBOX.    " TESTRUN (simulation), first [v1.1]
+  PARAMETERS: p_job   TYPE abap_bool AS CHECKBOX.                " run as a background job [v1.5]
   PARAMETERS: p_runid TYPE zdelot_run_id,                          " blank = new RUN_ID
               p_reprc TYPE abap_bool AS CHECKBOX.                " reprocess error lines only
+  PARAMETERS: p_maxmt TYPE i DEFAULT 9999999.                    " max. materials per run, 0 = all [v1.4]
   PARAMETERS: p_full  RADIOBUTTON GROUP mod DEFAULT 'X',         " Full Validation Mode
               p_dir   RADIOBUTTON GROUP mod.                     " Direct Transfer Mode
+  PARAMETERS: p_noqty TYPE abap_bool AS CHECKBOX.                " deactivate the quantity check vs file [v0.9, moved v1.6]
   SELECT-OPTIONS: s_stat FOR gv_sel_stat.                        " ALV status filter, blank = all
 SELECTION-SCREEN END OF BLOCK b3.
 
@@ -573,7 +633,6 @@ SELECTION-SCREEN BEGIN OF BLOCK b6 WITH FRAME TITLE TEXT-b06.
               p_st3 RADIOBUTTON GROUP stk,                       " unrestricted + blocked + QI
               p_st4 RADIOBUTTON GROUP stk,                       " blocked only
               p_st5 RADIOBUTTON GROUP stk.                       " quality inspection only
-  PARAMETERS: p_noqty TYPE abap_bool AS CHECKBOX.                " deactivate the quantity check vs file
 SELECTION-SCREEN END OF BLOCK b6.
 
 SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-b01.
@@ -646,11 +705,19 @@ START-OF-SELECTION.
     ENDIF.
   ENDIF.
 
+* Option: run as a background job started immediately       [v1.5]
+  IF p_job = abap_true AND sy-batch = abap_false.
+    PERFORM f_submit_job.
+    gv_job = abap_true.
+    RETURN.
+  ENDIF.
+
   PERFORM f_init.
 
 * Option 2: materials NOT in the file, no split valuation   [v0.7]
   IF p_nonspl = abap_true.
     PERFORM f_prepare_nonsplit.
+    PERFORM f_apply_max_materials.                              " [v1.4]
     PERFORM f_process_lines.
     PERFORM f_save_logs.
   ELSE.
@@ -686,6 +753,9 @@ START-OF-SELECTION.
     PERFORM f_check_sap_not_in_file.
   ENDIF.
 
+* maximum number of materials of this run                    [v1.4]
+  PERFORM f_apply_max_materials.
+
 * 3.2 - 3.6 - process every input line
   PERFORM f_process_lines.
 
@@ -695,7 +765,10 @@ START-OF-SELECTION.
   ENDIF.
 
 END-OF-SELECTION.
-  PERFORM f_display_alv.
+* nothing to show when the run was handed over to a job        [v1.5]
+  IF gv_job = abap_false.
+    PERFORM f_display_alv.
+  ENDIF.
 
 *&---------------------------------------------------------------------*
 *&      Form  F_F4_STATUS
@@ -1032,6 +1105,17 @@ FORM f_check_screen.
     RETURN.
   ENDIF.
 
+* --- background job: no PC file in a job                       [v1.5]
+  IF p_job = abap_true AND p_loc = abap_true.
+    MESSAGE 'A background job needs the file on the application server - copy it first with ZPTP_SPLIT_VAL_UPLD'
+            TYPE 'E'.
+  ENDIF.
+
+* --- maximum number of materials                              [v1.4]
+  IF p_maxmt < 0.
+    MESSAGE 'The maximum number of materials cannot be negative (0 = no limit)' TYPE 'E'.
+  ENDIF.
+
 * --- emptying the logs removes the history a reprocessing relies on
   IF p_clr = abap_true AND p_reprc = abap_true.
     MESSAGE 'Delete all logs cannot be combined with Reprocess errors' TYPE 'E'.
@@ -1105,6 +1189,94 @@ FORM f_check_screen.
     IF sy-subrc <> 0.
       MESSAGE |RUN_ID { p_runid } does not exist in ZPTP_MOV_EXEC| TYPE 'E'.
     ENDIF.
+  ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_SUBMIT_JOB                                      [v1.5]
+*&      P_JOB: the report submits itself, with every value of the
+*&      selection screen (RS_REFRESH_FROM_SELECTOPTIONS), as a background
+*&      job started immediately. The job gets P_JOB and P_CLR blank (the
+*&      logs, if asked, were already emptied in dialog) and a RUN_ID,
+*&      generated here when none was entered, so that the user knows it.
+*&      Releasing a job needs the authorization S_BTCH_JOB (RELE).
+*&---------------------------------------------------------------------*
+FORM f_submit_job.
+  DATA: lt_sel      TYPE STANDARD TABLE OF rsparams,
+        lv_jobname  TYPE tbtcjob-jobname VALUE 'ZPTP_SPLIT_VAL_MIG',
+        lv_jobcount TYPE tbtcjob-jobcount,
+        lv_rel      TYPE c,
+        lv_runid    TYPE zdelot_run_id,
+        lv_text     TYPE string.
+
+  CALL FUNCTION 'RS_REFRESH_FROM_SELECTOPTIONS'
+    EXPORTING  curr_report     = sy-repid
+    TABLES     selection_table = lt_sel
+    EXCEPTIONS not_found       = 1
+               no_report       = 2
+               OTHERS          = 3.
+  IF sy-subrc <> 0.
+    MESSAGE 'The selection could not be read for the background job' TYPE 'E'.
+  ENDIF.
+
+* RUN_ID known before the job starts
+  lv_runid = COND #( WHEN p_runid IS NOT INITIAL THEN p_runid
+                     ELSE |HBM{ sy-datum }{ sy-uzeit }| ).
+  LOOP AT lt_sel ASSIGNING FIELD-SYMBOL(<ls_sel>).
+    CASE <ls_sel>-selname.
+      WHEN 'P_JOB' OR 'P_CLR'.
+        CLEAR <ls_sel>-low.
+      WHEN 'P_RUNID'.
+        <ls_sel>-low = lv_runid.
+    ENDCASE.
+  ENDLOOP.
+
+  CALL FUNCTION 'JOB_OPEN'
+    EXPORTING  jobname          = lv_jobname
+    IMPORTING  jobcount         = lv_jobcount
+    EXCEPTIONS cant_create_job  = 1
+               invalid_job_data = 2
+               jobname_missing  = 3
+               OTHERS           = 4.
+  IF sy-subrc <> 0.
+    MESSAGE |Background job could not be created (JOB_OPEN, return code { sy-subrc })| TYPE 'E'.
+  ENDIF.
+
+  SUBMIT (sy-repid)
+    WITH SELECTION-TABLE lt_sel
+    VIA JOB lv_jobname NUMBER lv_jobcount
+    AND RETURN.
+  IF sy-subrc <> 0.
+    MESSAGE |The report could not be added to job { lv_jobname } (return code { sy-subrc })| TYPE 'E'.
+  ENDIF.
+
+  CALL FUNCTION 'JOB_CLOSE'
+    EXPORTING  jobcount             = lv_jobcount
+               jobname              = lv_jobname
+               strtimmed            = abap_true
+    IMPORTING  job_was_released     = lv_rel
+    EXCEPTIONS cant_start_immediate = 1
+               invalid_startdate    = 2
+               jobname_missing      = 3
+               job_close_failed     = 4
+               job_nosteps          = 5
+               job_notex            = 6
+               lock_failed          = 7
+               invalid_target       = 8
+               OTHERS               = 9.
+  IF sy-subrc <> 0.
+    lv_text = |Job { lv_jobname } ({ lv_jobcount }) created but not started (return code | &&
+              |{ sy-subrc }) - release it in SM37. RUN_ID { lv_runid }|.
+    MESSAGE lv_text TYPE 'S' DISPLAY LIKE 'W'.
+  ELSEIF lv_rel <> abap_true.
+    lv_text = |Job { lv_jobname } ({ lv_jobcount }) scheduled but not released (authorization | &&
+              |S_BTCH_JOB) - release it in SM37. RUN_ID { lv_runid }|.
+    MESSAGE lv_text TYPE 'S' DISPLAY LIKE 'W'.
+  ELSE.
+    lv_text = |Job { lv_jobname } ({ lv_jobcount }) started, RUN_ID { lv_runid }| &&
+              |{ COND string( WHEN p_test = abap_true THEN ` (simulation)` ) } - follow it in SM37; | &&
+              |log in ZPTP_MOV_EXEC|.
+    MESSAGE lv_text TYPE 'S'.
   ENDIF.
 ENDFORM.
 
@@ -1214,7 +1386,8 @@ FORM f_log_run_params.
                    |, { COND string( WHEN gv_run_mode = gc_mode_dir THEN 'DIRECT' ELSE 'FULL' ) }| &&
                    |, zero-stock batches: { COND string( WHEN p_zbat = abap_true
                                                          THEN 'YES' ELSE 'NO' ) }| &&
-                   |{ COND string( WHEN p_reprc = abap_true THEN ', reprocess errors only' ) }|.
+                   |{ COND string( WHEN p_reprc = abap_true THEN ', reprocess errors only' ) }| &&
+                   |{ COND string( WHEN p_maxmt > 0 THEN |, max. { p_maxmt } materials| ) }|.
   PERFORM f_add_log USING gc_msgid '054' 'W' CHANGING ls_out.
 ENDFORM.
 
@@ -1448,6 +1621,11 @@ FORM f_parse_lines USING it_lines TYPE stringtab
 
     lv_idx = sy-tabix.
 
+*   invisible characters (carriage return of a Windows file read on a
+*   Unix server, byte order mark, non-breaking space) would stick to
+*   the last field, the unit, and make it unknown            [v1.3]
+    PERFORM f_clean_line CHANGING lv_line.
+
 *   blank line -> ignored, no log
     IF lv_line IS INITIAL OR lv_line CO ' '.
       CONTINUE.
@@ -1558,7 +1736,9 @@ FORM f_parse_lines USING it_lines TYPE stringtab
         ls_out-bwtar     = ls_raw-bwtar.
         ls_out-qty_input = ls_raw-menge.
         ls_out-status    = gc_st_err.
-        ls_out-message   = |Line { lv_idx }: unit of measure '{ lv_uom_ext }' unknown - line rejected|.
+        ls_out-message   = |Line { lv_idx }: unit of measure '{ lv_uom_ext }' | &&
+                           |({ strlen( lv_uom_ext ) } character(s)) unknown in language | &&
+                           |{ sy-langu } and in English - line rejected|.
         PERFORM f_add_log USING gc_msgid '017' 'E' CHANGING ls_out.
         CONTINUE.
       ENDIF.
@@ -1611,6 +1791,30 @@ FORM f_parse_lines USING it_lines TYPE stringtab
 ENDFORM.
 
 *&---------------------------------------------------------------------*
+*&      Form  F_CLEAN_LINE                                      [v1.3]
+*&      Removes the characters a file line may carry that are not data:
+*&      carriage return (Windows file read on a Unix server), byte order
+*&      mark, zero-width space; a non-breaking space becomes a space.
+*&---------------------------------------------------------------------*
+FORM f_clean_line CHANGING cv_line TYPE string.
+  DATA(lv_cr)   = substring( val = cl_abap_char_utilities=>cr_lf len = 1 ).
+  DATA(lv_bom)  = CONV string( cl_abap_conv_in_ce=>uccp( 'FEFF' ) ).
+  DATA(lv_zw)   = CONV string( cl_abap_conv_in_ce=>uccp( '200B' ) ).
+  DATA(lv_nbsp) = CONV string( cl_abap_conv_in_ce=>uccp( '00A0' ) ).
+
+  REPLACE ALL OCCURRENCES OF lv_cr  IN cv_line WITH ``.
+  IF lv_bom IS NOT INITIAL.
+    REPLACE ALL OCCURRENCES OF lv_bom IN cv_line WITH ``.
+  ENDIF.
+  IF lv_zw IS NOT INITIAL.
+    REPLACE ALL OCCURRENCES OF lv_zw IN cv_line WITH ``.
+  ENDIF.
+  IF lv_nbsp IS NOT INITIAL.
+    REPLACE ALL OCCURRENCES OF lv_nbsp IN cv_line WITH ` `.
+  ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
 *&      Form  F_CONVERT_UNIT                                    [v0.8]
 *&      External unit of the file -> internal unit. The value is tried as
 *&      typed, then upper-cased, each time with the micro sign (U+00B5)
@@ -1651,16 +1855,28 @@ FORM f_convert_unit USING    iv_ext TYPE meins
     APPEND lv_try TO lt_try.
   ENDDO.
 
+* external unit in the logon language, then in English (the file may
+* have been built by a user logged on in another language), then the
+* internal unit itself (ST, ML ...)                            [v1.3]
+  DATA(lt_lang) = VALUE string_table( ( CONV string( sy-langu ) ) ( `E` ) ).
   LOOP AT lt_try INTO lv_try.
     lv_inp = lv_try.
-    CALL FUNCTION 'CONVERSION_EXIT_CUNIT_INPUT'
-      EXPORTING  input          = lv_inp
-                 language       = sy-langu
-      IMPORTING  output         = cv_int
-      EXCEPTIONS unit_not_found = 1
-                 OTHERS         = 2.
+    LOOP AT lt_lang INTO DATA(lv_lang).
+      CALL FUNCTION 'CONVERSION_EXIT_CUNIT_INPUT'
+        EXPORTING  input          = lv_inp
+                   language       = CONV sy-langu( lv_lang )
+        IMPORTING  output         = cv_int
+        EXCEPTIONS unit_not_found = 1
+                   OTHERS         = 2.
+      IF sy-subrc = 0.
+        cv_ok = abap_true.
+        RETURN.
+      ENDIF.
+    ENDLOOP.
+    SELECT SINGLE msehi FROM t006 INTO @DATA(lv_msehi) WHERE msehi = @lv_inp.
     IF sy-subrc = 0.
-      cv_ok = abap_true.
+      cv_int = lv_msehi.
+      cv_ok  = abap_true.
       RETURN.
     ENDIF.
   ENDLOOP.
@@ -2253,18 +2469,34 @@ FORM f_load_prev_errors.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*&      Form  F_CHECK_SAP_NOT_IN_FILE   (3.2 case 2)
-*&      SAP stock not present in file: if a valuation-type segment
-*&      already exists in target plant -> inconsistency -> error logged.
+*&      Form  F_CHECK_SAP_NOT_IN_FILE   (3.2 case 2)        [v1.6]
+*&      SAP stock not present in the file: added as a line of its own,
+*&      posted with the SAP stock and a warning (see the header).
 *&---------------------------------------------------------------------*
 FORM f_check_sap_not_in_file.
-
-  DATA: ls_stk TYPE gty_stock,
-        ls_out TYPE gty_out.
+* v1.6: stock of a material + batch missing from the file is added as a
+* line of its own, posted with the SAP quantity and a warning, instead
+* of the former I / X statuses.
+  TYPES: BEGIN OF lty_fvt,
+           matnr TYPE matnr,
+           bwtar TYPE bwtar_d,
+         END OF lty_fvt.
+  DATA: ls_stk  TYPE gty_stock,
+        ls_out  TYPE gty_out,
+        ls_raw  TYPE gty_input_raw,
+        lt_fvt  TYPE SORTED TABLE OF lty_fvt WITH UNIQUE KEY matnr bwtar,
+        lv_nvt  TYPE i,
+        lv_vt   TYPE bwtar_d,
+        lv_rule TYPE string.
 
   IF gv_run_mode = gc_mode_dir.
     RETURN.                          " Direct mode bypasses validations
   ENDIF.
+
+* valuation types the file gives per material (usable lines only)
+  LOOP AT gt_input_raw INTO ls_raw WHERE bad = abap_false AND bwtar IS NOT INITIAL.
+    INSERT VALUE lty_fvt( matnr = ls_raw-matnr bwtar = ls_raw-bwtar ) INTO TABLE lt_fvt.
+  ENDLOOP.
 
   LOOP AT gt_stock INTO ls_stk.
     READ TABLE gt_input_sum TRANSPORTING NO FIELDS
@@ -2288,28 +2520,62 @@ FORM f_check_sap_not_in_file.
       CONTINUE.
     ENDIF.
 
-    CLEAR ls_out.
-    ls_out-matnr   = ls_stk-matnr.
-    ls_out-charg   = ls_stk-charg.
-    ls_out-xchpf   = ls_stk-xchpf.
-    ls_out-qty_sap = ls_stk-menge.
-    ls_out-meins   = ls_stk-meins.
-
-    IF lcl_help=>is_segment_created( iv_matnr = ls_stk-matnr
-                                     iv_bwkey = p_wdst ) = abap_true.
-*     inconsistency: stock exists in SAP, valuation segment already in
-*     target plant, but the record is missing from the input file.
-      ls_out-status  = gc_st_incons.
-      ls_out-message = 'Inconsistency: SAP stock not in input file but '
-                    && 'valuation segment exists in target plant'.
-      PERFORM f_add_log USING gc_msgid '010' 'E' CHANGING ls_out.
-    ELSE.
-*     not in file and no segment -> nothing to migrate; informational.
+*   nothing of the stock type moved by this run: nothing to post
+    IF ls_stk-mfree <= 0.
+      CLEAR ls_out.
+      ls_out-matnr   = ls_stk-matnr.
+      ls_out-charg   = ls_stk-charg.
+      ls_out-xchpf   = ls_stk-xchpf.
+      ls_out-qty_sap = ls_stk-menge.
+      ls_out-meins   = ls_stk-meins.
       ls_out-status  = gc_st_skip.
-      ls_out-message = 'SAP stock not in input file (no target segment) '
-                    && '- not processed'.
+      ls_out-message = |SAP stock not in input file, but no { gv_move_txt } to move - not processed|.
       PERFORM f_add_log USING gc_msgid '011' 'W' CHANGING ls_out.
+      CONTINUE.
     ENDIF.
+
+*   valuation type: the file's one for this material, when unique
+    CLEAR: lv_vt, lv_rule, lv_nvt.
+    LOOP AT lt_fvt INTO DATA(ls_fvt) WHERE matnr = ls_stk-matnr.
+      lv_nvt = lv_nvt + 1.
+      lv_vt  = ls_fvt-bwtar.
+    ENDLOOP.
+    IF lv_nvt = 1.
+      lv_rule = |valuation type { lv_vt } of the other batches of the material in the file|.
+    ELSE.
+      lv_vt = lcl_help=>first_bwtar( iv_matnr = ls_stk-matnr iv_bwkey = p_wdst ).
+      IF lv_vt IS NOT INITIAL.
+        lv_rule = |first valuation type { lv_vt } of the material in plant { p_wdst }|.
+      ENDIF.
+    ENDIF.
+
+    CLEAR ls_raw.
+    ls_raw-matnr = ls_stk-matnr.
+    ls_raw-charg = ls_stk-charg.
+    ls_raw-bwtar = lv_vt.
+    ls_raw-menge = ls_stk-mfree.               " stock of the transfer mode
+    ls_raw-meins = ls_stk-meins.
+    ls_raw-auto  = abap_true.
+
+    IF lv_vt IS INITIAL.
+      IF lcl_help=>is_split_valuated( iv_matnr = ls_stk-matnr iv_bwkey = p_wdst ) = abap_true.
+*       split-valuated in the target plant but no valuation type known
+        ls_raw-bad   = abap_true.
+        ls_raw-badno = '010'.
+        ls_raw-badtx = |Batch not in the input file, SAP stock { ls_stk-mfree } { ls_stk-meins } | &&
+                       |- no valuation type found in plant { p_wdst }: not posted|.
+      ELSE.
+        lv_rule = |no valuation type, material not split-valuated in plant { p_wdst }|.
+      ENDIF.
+    ENDIF.
+    ls_raw-warn = |Batch not in the input file - posted with the SAP stock { ls_stk-mfree } | &&
+                  |{ ls_stk-meins } ({ gv_move_txt }), { lv_rule }|.
+    APPEND ls_raw TO gt_input_raw.
+
+*   the quantity check (3.5) compares with the stock read: it passes
+    INSERT VALUE gty_input_sum( matnr = ls_stk-matnr charg = ls_stk-charg
+                                menge = ls_stk-menge meins = ls_stk-meins )
+           INTO TABLE gt_input_sum.
   ENDLOOP.
 ENDFORM.
 
@@ -2444,6 +2710,74 @@ FORM f_prepare_nonsplit.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
+*&      Form  F_APPLY_MAX_MATERIALS                             [v1.4]
+*&      P_MAXMT > 0: keeps the lines of the first P_MAXMT materials of
+*&      GT_INPUT_RAW. With a RUN_ID entered, lines already posted under
+*&      that RUN_ID (301, status S, real run) are left out first, so that
+*&      the same file run again with the same RUN_ID goes on with the
+*&      next materials. The quantity check and the reconciliation are not
+*&      affected: they already ran on the whole file.
+*&---------------------------------------------------------------------*
+FORM f_apply_max_materials.
+  TYPES: BEGIN OF lty_key,
+           matnr TYPE matnr,
+           charg TYPE charg_d,
+           bwtar TYPE bwtar_d,
+         END OF lty_key.
+  DATA: lt_posted TYPE SORTED TABLE OF lty_key WITH UNIQUE KEY matnr charg bwtar,
+        lt_mat    TYPE gtt_matnr,              " materials processed in this run
+        lt_rest   TYPE gtt_matnr,              " materials left for a next run
+        lt_keep   TYPE gtt_input_raw,
+        ls_raw    TYPE gty_input_raw,
+        ls_out    TYPE gty_out,
+        lv_posted TYPE i,
+        lv_rest   TYPE i.
+
+  IF p_maxmt <= 0.
+    RETURN.
+  ENDIF.
+
+* lines already posted under this RUN_ID (previous runs of the file)
+  IF p_runid IS NOT INITIAL.
+    SELECT DISTINCT matnr, charg, bwtar FROM zptp_mov_exec
+      INTO CORRESPONDING FIELDS OF TABLE @lt_posted
+      WHERE run_id  = @gv_run_id
+        AND status  = @gc_st_ok
+        AND testrun = @space
+        AND bwart   = @gc_mov_type.
+  ENDIF.
+
+  LOOP AT gt_input_raw INTO ls_raw.
+    READ TABLE lt_posted TRANSPORTING NO FIELDS
+         WITH TABLE KEY matnr = ls_raw-matnr charg = ls_raw-charg bwtar = ls_raw-bwtar.
+    IF sy-subrc = 0.
+      lv_posted = lv_posted + 1.
+      CONTINUE.
+    ENDIF.
+    READ TABLE lt_mat TRANSPORTING NO FIELDS WITH TABLE KEY table_line = ls_raw-matnr.
+    IF sy-subrc <> 0.
+      IF lines( lt_mat ) >= p_maxmt.
+        INSERT ls_raw-matnr INTO TABLE lt_rest.
+        lv_rest = lv_rest + 1.
+        CONTINUE.
+      ENDIF.
+      INSERT ls_raw-matnr INTO TABLE lt_mat.
+    ENDIF.
+    APPEND ls_raw TO lt_keep.
+  ENDLOOP.
+  gt_input_raw = lt_keep.
+
+  ls_out-status  = gc_st_warn.
+  ls_out-message = |Maximum { p_maxmt } materials: { lines( lt_mat ) } material(s) processed, | &&
+                   |{ lines( lt_rest ) } material(s) ({ lv_rest } line(s)) left for a next run| &&
+                   |{ COND string( WHEN lv_posted > 0
+                                   THEN |, { lv_posted } line(s) already posted under RUN_ID { gv_run_id } skipped| ) }| &&
+                   |{ COND string( WHEN lines( lt_rest ) > 0 AND p_runid IS INITIAL
+                                   THEN ` - run again with this RUN_ID to go on` ) }|.
+  PERFORM f_add_log USING gc_msgid '056' 'W' CHANGING ls_out.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
 *&      Form  F_PROCESS_LINES   (3.2 - 3.6 per input line)
 *&---------------------------------------------------------------------*
 FORM f_process_lines.
@@ -2492,6 +2826,7 @@ FORM f_process_lines.
     ls_out-qty_input = ls_raw-menge.
     ls_out-meins     = ls_raw-meins.
     ls_out-normbat   = ls_raw-norm.
+    ls_out-autowarn  = ls_raw-warn.                             " [v1.6]
 
 *   --- NO_BATCH declaration contradicted by the material master -----
     IF ls_raw-bad = abap_true.
@@ -2543,8 +2878,10 @@ FORM f_process_lines.
 *   ===== Full Validation Mode checks (bypassed in Direct mode) =====
     IF lv_full = abap_true AND p_split = abap_true.
 
-*     3.3 valuation-type segment must exist in target plant
-      IF lcl_help=>is_segment_created( iv_matnr = ls_raw-matnr
+*     3.3 valuation-type segment must exist in target plant (a line
+*     added from SAP stock without valuation type is not split) [v1.6]
+      IF NOT ( ls_raw-auto = abap_true AND ls_raw-bwtar IS INITIAL ) AND
+         lcl_help=>is_segment_created( iv_matnr = ls_raw-matnr
                                        iv_bwkey = p_wdst
                                        iv_bwtar = ls_raw-bwtar ) = abap_false.
         ls_out-status  = gc_st_err.
@@ -3364,8 +3701,22 @@ FORM f_add_log USING iv_id  TYPE symsgid
                CHANGING cs_out TYPE gty_out.
 
   DATA ls_log TYPE zptp_mov_exec.
+  DATA(lv_id) = iv_id.
+  DATA(lv_no) = iv_no.
+  DATA(lv_ty) = iv_ty.
 
   ADD 1 TO gv_posnr.
+
+* line added from SAP stock (not in the file): warning on its rows,
+* message type W when the row carries no error of its own     [v1.6]
+  IF cs_out-autowarn IS NOT INITIAL.
+    IF cs_out-message NS 'Batch not in the input file'.
+      cs_out-message = |WARNING: { cs_out-autowarn } - { cs_out-message }|.
+    ENDIF.
+    IF lv_ty IS INITIAL OR lv_ty = 'S'.
+      lv_id = gc_msgid. lv_no = '010'. lv_ty = 'W'.
+    ENDIF.
+  ENDIF.
 
 * make the normalisation visible on the record itself, once
   IF cs_out-normbat = abap_true AND cs_out-message NS 'normalised'.
@@ -3381,9 +3732,9 @@ FORM f_add_log USING iv_id  TYPE symsgid
   cs_out-werks_dst = p_wdst.
 * LGORT_DST = actual receiving location, blank when nothing was
 * allocated
-  cs_out-msgty     = iv_ty.
-  cs_out-msgid     = iv_id.
-  cs_out-msgno     = iv_no.
+  cs_out-msgty     = lv_ty.
+  cs_out-msgid     = lv_id.
+  cs_out-msgno     = lv_no.
 
   ls_log-run_id    = gv_run_id.
   ls_log-run_seq   = gv_run_seq.
@@ -3412,9 +3763,9 @@ FORM f_add_log USING iv_id  TYPE symsgid
   ls_log-status    = cs_out-status.
   ls_log-mblnr     = cs_out-mblnr.
   ls_log-mjahr     = cs_out-mjahr.
-  ls_log-msgty     = iv_ty.
-  ls_log-msgid     = iv_id.
-  ls_log-msgno     = iv_no.
+  ls_log-msgty     = lv_ty.
+  ls_log-msgid     = lv_id.
+  ls_log-msgno     = lv_no.
   ls_log-msgtx     = cs_out-message.
   ls_log-ernam     = sy-uname.
   ls_log-erdat     = sy-datum.
@@ -3551,6 +3902,7 @@ FORM f_display_alv.
     ls_fcat-seltext_m = &2. ls_fcat-seltext_s = &2.
     APPEND ls_fcat TO lt_fcat.
   END-OF-DEFINITION.
+  add_col 'RUN_ID'     'RUN_ID'.                              " first column [v1.6]
   add_col 'STATUS'     'Status'.
   add_col 'MATNR'      'Material'.
   add_col 'CHARG'      'Batch'.
@@ -3572,7 +3924,6 @@ FORM f_display_alv.
   add_col 'MSGID'      'Msg Class'.
   add_col 'MSGNO'      'Msg No'.
   add_col 'MESSAGE'    'Message'.
-  add_col 'RUN_ID'     'RUN_ID'.
   add_col 'RUN_SEQ'    'Seq'.
   add_col 'RUN_MODE'   'Mode'.
   add_col 'TESTRUN'    'Simulation'.
