@@ -3,7 +3,7 @@
 *&---------------------------------------------------------------------*
 *& Project : HBM - Split Valuation migration
 *& Scope   : Clearing of batch stocks / Inter-plant transfer
-*& Version : v1.1
+*& Version : v1.2
 *& Package : ZPTP_SPLIT_VAL        Message class: ZPTP_SPLIT_VAL
 *&
 *&---------------------------------------------------------------------*
@@ -883,12 +883,34 @@ ENDFORM.
 *&      F4 help for the input file path (local and application server)
 *&---------------------------------------------------------------------*
 FORM f_f4_file.
-  DATA: lt_ftab    TYPE filetable,
-        ls_ftab    TYPE file_table,
-        lv_rc      TYPE i,
-        lv_usr     TYPE i,
-        lv_srvpath TYPE dxfields-longpath,   " start folder, typed as I_PATH
-        lv_srvfile TYPE dxfields-longpath.
+* PC: Windows file dialog. Application server: list of the files of
+* the directory typed in the field (DIR_HOME when none), F_F4_SERVER,
+* as in ZPTP_SPLIT_VAL_BATCH_COPY.                             [v1.2]
+  DATA: lt_ftab TYPE filetable,
+        ls_ftab TYPE file_table,
+        lv_rc   TYPE i,
+        lv_usr  TYPE i,
+        lt_dynp TYPE STANDARD TABLE OF dynpread.
+
+* current values on the screen: the radio buttons and the path typed
+* are not yet transferred to the program at F4 time
+  lt_dynp = VALUE #( ( fieldname = 'P_SRV' ) ( fieldname = 'P_FILE' ) ).
+  CALL FUNCTION 'DYNP_VALUES_READ'
+    EXPORTING  dyname     = sy-repid
+               dynumb     = sy-dynnr
+    TABLES     dynpfields = lt_dynp
+    EXCEPTIONS OTHERS     = 1.
+  IF sy-subrc = 0.
+    READ TABLE lt_dynp INTO DATA(ls_dynp) WITH KEY fieldname = 'P_SRV'.
+    IF sy-subrc = 0.
+      p_srv = ls_dynp-fieldvalue.
+      p_loc = xsdbool( p_srv <> abap_true ).
+    ENDIF.
+    READ TABLE lt_dynp INTO ls_dynp WITH KEY fieldname = 'P_FILE'.
+    IF sy-subrc = 0.
+      p_file = condense( CONV string( ls_dynp-fieldvalue ) ).
+    ENDIF.
+  ENDIF.
 
   IF p_loc = abap_true.
     CALL METHOD cl_gui_frontend_services=>file_open_dialog
@@ -903,26 +925,91 @@ FORM f_f4_file.
       ENDIF.
     ENDIF.
   ELSE.
-*   application server directory browser. P_FILE is a string: the
-*   function module checks the type of I_PATH at runtime and dumps
-*   (CALL_FUNCTION_CONFLICT_TYPE), so pass a DXFIELDS-LONGPATH copy.
-    lv_srvpath = p_file.
-    CALL FUNCTION 'F4_DXFILENAME_TOPRECURSION'
-      EXPORTING
-        i_location_flag = 'A'              " application server
-        i_server        = ' '
-        i_path          = lv_srvpath
-        filemask        = '*.*'
-        fileoperation   = 'R'
-      IMPORTING
-        o_path          = lv_srvfile
-      EXCEPTIONS
-        rfc_error             = 1
-        error_with_gui        = 2
-        OTHERS                = 3.
-    IF sy-subrc = 0 AND lv_srvfile IS NOT INITIAL.
-      p_file = lv_srvfile.
+*   F4_DXFILENAME_TOPRECURSION failed on system directories such as
+*   /usr ("IDoc internal error"): replaced by a plain file list [v1.2]
+    PERFORM f_f4_server.
+  ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_F4_SERVER                                       [v1.2]
+*&      Files of one application-server directory: the directory part of
+*&      the path typed in P_FILE, or DIR_HOME when the field holds no
+*&      directory. To go up or elsewhere, type that directory in the
+*&      field and press F4 again. The chosen file fills P_FILE.
+*&---------------------------------------------------------------------*
+FORM f_f4_server.
+  DATA: lv_path  TYPE string,
+        lv_dir   TYPE eps2filnam,
+        lv_sep   TYPE c,
+        lv_value TYPE spfl_parameter_value,
+        lt_list  TYPE STANDARD TABLE OF eps2fili,
+        lt_ret   TYPE STANDARD TABLE OF ddshretval.
+
+  lv_path = p_file.
+  IF lv_path CA '/\'.
+*   directory = everything before the last separator
+    FIND ALL OCCURRENCES OF REGEX '[\\/]' IN lv_path MATCH OFFSET DATA(lv_off).
+    lv_sep = lv_path+lv_off(1).
+    IF lv_off = 0.
+      lv_dir = lv_sep.                                  " root directory
+    ELSE.
+      lv_dir = substring( val = lv_path len = lv_off ).
     ENDIF.
+  ELSE.
+    cl_spfl_profile_parameter=>get_value( EXPORTING name  = 'DIR_HOME'
+                                          IMPORTING value = lv_value ).
+    lv_dir = lv_value.
+    lv_sep = COND #( WHEN lv_dir CA '\' THEN '\' ELSE '/' ).
+  ENDIF.
+  IF lv_dir IS INITIAL.
+    MESSAGE 'Type a directory in the file field, then press F4' TYPE 'S' DISPLAY LIKE 'W'.
+    RETURN.
+  ENDIF.
+
+  CALL FUNCTION 'EPS2_GET_DIRECTORY_LISTING'
+    EXPORTING  iv_dir_name            = lv_dir
+    TABLES     dir_list               = lt_list
+    EXCEPTIONS invalid_eps_subdir     = 1
+               sapgparam_failed       = 2
+               build_directory_failed = 3
+               no_authorization       = 4
+               read_directory_failed  = 5
+               too_many_read_errors   = 6
+               empty_directory_list   = 7
+               OTHERS                 = 8.
+  CASE sy-subrc.
+    WHEN 0.
+    WHEN 4.
+      MESSAGE |No authorization to read directory { lv_dir } (S_DATASET)| TYPE 'S' DISPLAY LIKE 'E'.
+      RETURN.
+    WHEN 7.
+      MESSAGE |Directory { lv_dir } is empty| TYPE 'S' DISPLAY LIKE 'W'.
+      RETURN.
+    WHEN OTHERS.
+      MESSAGE |Directory { lv_dir } cannot be read (return code { sy-subrc }) - check the path in AL11|
+              TYPE 'S' DISPLAY LIKE 'E'.
+      RETURN.
+  ENDCASE.
+
+  SORT lt_list BY name.
+  CALL FUNCTION 'F4IF_INT_TABLE_VALUE_REQUEST'
+    EXPORTING  retfield        = 'NAME'
+               window_title    = CONV char40( |Files in { lv_dir }| )
+               value_org       = 'S'
+    TABLES     value_tab       = lt_list
+               return_tab      = lt_ret
+    EXCEPTIONS parameter_error = 1
+               no_values_found = 2
+               OTHERS          = 3.
+  IF sy-subrc <> 0.
+    RETURN.
+  ENDIF.
+  READ TABLE lt_ret INTO DATA(ls_ret) INDEX 1.
+  IF sy-subrc = 0 AND ls_ret-fieldval IS NOT INITIAL.
+    p_file = COND #( WHEN substring( val = CONV string( lv_dir ) off = strlen( lv_dir ) - 1 len = 1 ) = lv_sep
+                     THEN |{ lv_dir }{ ls_ret-fieldval }|
+                     ELSE |{ lv_dir }{ lv_sep }{ ls_ret-fieldval }| ).
   ENDIF.
 ENDFORM.
 
