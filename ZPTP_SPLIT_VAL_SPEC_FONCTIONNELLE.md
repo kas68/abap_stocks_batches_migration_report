@@ -97,7 +97,7 @@ En simulation (P_TEST coché, valeur par défaut), le programme exécute tous le
 
 ## 3. Écran de sélection
 
-L'écran regroupe 30 paramètres en sept blocs (le bloc « Processing option » a été ajouté en v0.7 ; le cadre extérieur titré STOCKS & BATCHES MIGRATION PROGRAM a été supprimé). Chaque paramètre est libellé *libellé (nom technique)*, par exemple *Source plant (P_WSRC)* ; les libellés de l'écran sont en anglais. Les contrôles de cohérence ne s'exécutent qu'au lancement (F8, job d'arrière-plan, impression), pas à chaque changement de sélection. Quand l'option de suppression P_DEL est cochée, seul le RUN_ID est contrôlé.
+L'écran regroupe 26 paramètres en six blocs (le bloc « Processing option » a été ajouté en v0.7 ; le cadre extérieur titré STOCKS & BATCHES MIGRATION PROGRAM a été supprimé). Chaque paramètre est libellé *libellé (nom technique)*, par exemple *Source plant (P_WSRC)* ; les libellés de l'écran sont en anglais. Les contrôles de cohérence ne s'exécutent qu'au lancement (F8, job d'arrière-plan, impression), pas à chaque changement de sélection. Quand l'option de suppression P_DEL est cochée, seul le RUN_ID est contrôlé.
 
 ### 3.0 Bloc « Processing option » (v0.7, P_ZBAT v0.8)
 
@@ -123,18 +123,9 @@ Modes 2 et 3 :
 - La quantité du fichier est comparée au stock transféré (stock bloqué ; stock qualité hors lot de contrôle) ; le bloc « Stock scope » est ignoré. P_NOQTY désactive toujours le contrôle.
 - Les deux options utilisent le mode. Un run qui contient un document réel (statut S ou W) ne peut pas être supprimé avec P_DEL.
 
-### 3.0b Bloc « Stock scope » (v0.9, mode 1 uniquement depuis la v1.0)
+### 3.0b Bloc « Stock scope » — supprimé en v1.7
 
-| Paramètre | Libellé | Défaut | Signification et fonctionnement |
-| --- | --- | --- | --- |
-| P_ST1 | Unrestricted stock | coché | Stock comparé au fichier et utilisé pour le rapprochement « stock SAP absent du fichier » : stock libre seul. |
-| P_ST2 | Unrestricted + blocked stock | — | Stock libre plus stock bloqué (CSPEM / SPEME). |
-| P_ST3 | Unrestricted + blocked + QI stock | — | Plus le stock en contrôle qualité (CINSM / INSME). |
-| P_ST4 | Blocked stock only | — | Stock bloqué seul. |
-| P_ST5 | Quality inspection stock only | — | Stock en contrôle qualité seul. |
-| P_NOQTY | Deactivate quantity check vs file | décoché | Saute le contrôle de quantité fichier / SAP (étape 3.5, message 004) ; l'écart n'est pas calculé. Les autres contrôles, la répartition (005) et le rapprochement restent actifs. |
-
-Le périmètre est un **périmètre de contrôle**. Le mouvement 301 déplace toujours le **stock libre seul** : une quantité du fichier supérieure au stock libre est bloquée par le contrôle de répartition (005), quel que soit le périmètre. En option 2, le périmètre choisit les lots considérés et la quantité déplacée est la part libre (un lot dont le stock n'est que bloqué ou en qualité est logué en statut Z, sans mouvement). Le périmètre s'applique aux deux options ; P_NOQTY est sans effet sur l'option 2 (pas de quantité fichier).
+Le fichier est toujours comparé au stock que le run transfère (type de stock transféré : libre, bloqué, ou qualité hors lot de contrôle). « Deactivate qty check vs file » (P_NOQTY) est désormais dans le bloc Run control.
 
 ### 3.1 Bloc « Organizational data »
 
@@ -313,7 +304,7 @@ Les erreurs renvoyées par les BAPI SAP (création de lot, mouvement) sont repri
 
 | Programme | Rôle |
 | --- | --- |
-| ZPTP_SPLIT_VAL_MIG_UTILITY (transaction ZPTP_SPLIT_VAL_UTIL) | Construit le fichier CSV d'entrée à partir du stock SAP et des types de valorisation de l'usine cible. Le stock extrait se choisit comme le mode de transfert de la migration (v0.2) : libre (défaut), bloqué, ou qualité hors lot de contrôle (lots de contrôle ouverts déduits par magasin). Le lancer avec le même choix que la migration pour que le fichier passe le contrôle de quantité. |
+| ZPTP_SPLIT_VAL_MIG_UTILITY (transaction ZPTP_SPLIT_VAL_UTIL) | Construit le fichier CSV d'entrée à partir du stock SAP et des types de valorisation de l'usine cible. Le stock extrait se choisit comme le mode de transfert de la migration (v0.2) : libre (défaut), bloqué, ou qualité hors lot de contrôle (lots de contrôle ouverts déduits par magasin). Le lancer avec le même choix que la migration pour que le fichier passe le contrôle de quantité. L'option 4 (v0.3) n'extrait que le stock qualité retenu par des lots de contrôle ouverts, pour analyse et rapprochement : la migration ne transfère pas ce stock. Mode d'exécution (v0.4) : **Online** (défaut) télécharge le fichier sur le PC via une fenêtre d'enregistrement, comme avant ; **Background** lance le programme en job d'arrière-plan (SM37), qui écrit le fichier dans un répertoire du serveur d'application (défaut /tmp) ; le fichier se récupère ensuite avec CG3Y ou se lit directement par la migration depuis le serveur d'application. Type de valorisation (v0.5), lu dans l'usine 2 : les articles gérés par lot prennent le type de valorisation de la fiche lot dans l'usine 2 (lot absent ou sans type de valorisation : ligne rejetée) ; les articles non gérés par lot prennent le premier type de valorisation, par ordre alphabétique, dont le prix standard est différent de zéro ; les articles sans valorisation séparée dans l'usine 2 sont écrits par lot avec un type de valorisation vide et leur quantité au niveau usine. L'ALV met en évidence les articles non gérés par lot (bleu) et sans valorisation séparée (orange). |
 | ZPTP_SPLIT_VAL_MIG_UPLOAD (transaction ZPTP_SPLIT_VAL_UPLD) | Dialogue uniquement. Copie un fichier du PC vers le serveur d'application (copie binaire, confirmation avant écrasement), pour que ZPTP_SPLIT_VAL_MIG puisse tourner en arrière-plan avec P_SRV. Un job ne peut pas lire un fichier du PC. |
 | ZPTP_SPLIT_VAL_BATCH_COPY (transaction ZPTP_SPLIT_VAL_BCPY) | Lit un fichier CSV (séparateur « ; », ligne 1 en-tête ; champs : article ; lot ; type de valorisation). Pour chaque ligne, lit les données du lot au niveau usine dans l'usine émettrice et crée le lot dans l'usine cible avec les mêmes attributs et le type de valorisation du fichier. Contrôles : colonnes renseignées, article étendu et géré par lot dans les deux usines, type de valorisation existant dans l'usine cible, lot source existant, pas de lot avec deux types de valorisation dans le fichier ; un lot déjà présent dans l'usine cible n'est pas modifié (S si même type de valorisation, E sinon). P_TEST (défaut coché) : contrôles seuls, aucune création. Résultat en liste ALV, pas de log en base. Deux modes (v0.2) : **Online** (défaut) liste les articles contrôlés ; un double-clic sur un article crée son lot après confirmation, et la ligne passe au vert (créé ou déjà présent) ou au rouge (erreur). **Background** traite tous les articles en un seul run (P_TEST s'applique), y compris en job avec un fichier serveur. |
 

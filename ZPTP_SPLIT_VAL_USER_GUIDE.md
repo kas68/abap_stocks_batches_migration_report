@@ -106,15 +106,9 @@ A job cannot read a PC file (P_LOC). First run **ZPTP_SPLIT_VAL_MIG_UPLOAD** (tr
 
 In modes 2 and 3 each line gives three material documents, one per movement; each is logged on its own rows (column Mvt type: 343 / 321, 301, 344 / 322). If the 301 fails, the first movement is reversed automatically (status E). If the last movement fails, the line gets status **W**: the stock is unrestricted in the target plant, post the 344 (mode 2) or 322 (mode 3) yourself with MIGO for the quantities shown. A simulation checks only the first movement. The file quantities must match the blocked stock (mode 2) or the QI stock without inspection lot (mode 3).
 
-### 3.1a Stock scope (v0.9, mode 1 only)
+### 3.1a Stock scope — removed in v1.7
 
-| Field | Default | What it does |
-| --- | --- | --- |
-| Unrestricted stock (P_ST1) | selected | The file quantity is compared with the unrestricted stock of the source plant. |
-| Unrestricted + blocked (P_ST2), + blocked + QI (P_ST3), Blocked only (P_ST4), QI only (P_ST5) | — | Changes which stock the file is compared with, and which stock the "SAP stock missing from the file" check looks at. |
-| Deactivate quantity check vs file (P_NOQTY) | unchecked | No file-versus-SAP quantity check (no message 004). The other checks stay active. |
-
-Important: the 301 only ever moves **unrestricted** stock. If the file quantity is larger than the unrestricted stock (for example because it includes blocked stock), the line is refused with message 005. The scope changes the check, not the stock moved.
+The file is compared with the stock that is moved (block "Stock type transferred"). To migrate every stock type, run once per type with a file built by the utility for that type. "Deactivate quantity check vs file" is in the Run control block.
 
 ### 3.1b Processing option (v0.7)
 

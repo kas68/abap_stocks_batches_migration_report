@@ -3,7 +3,7 @@
 *&---------------------------------------------------------------------*
 *& Project : HBM - Split Valuation migration
 *& Scope   : Clearing of batch stocks / Inter-plant transfer
-*& Version : v1.6
+*& Version : v1.8
 *& Package : ZPTP_SPLIT_VAL        Message class: ZPTP_SPLIT_VAL
 *&
 *&---------------------------------------------------------------------*
@@ -62,15 +62,11 @@
 *&   plant (MCHA, not flagged for deletion) with no unrestricted stock, for
 *&   materials not in the file. Without P_ZBAT a zero line stays status Z.
 *&
-*& Stock scope (v0.9) - selection screen block B6, both options. The stock
-*&   read in the source plant for the quantity check and for the "SAP stock
-*&   not in file" reconciliation can be: unrestricted (default) /
-*&   unrestricted + blocked / unrestricted + blocked + quality inspection /
-*&   blocked only / quality inspection only. It is a CHECK scope: the 301
-*&   still moves unrestricted stock only, so a file quantity above the
-*&   unrestricted stock is blocked by the allocation check (005).
-*&   P_NOQTY deactivates the file-vs-SAP quantity check (3.5); the other
-*&   checks, the allocation and the reconciliation stay active.
+*& Quantity check (v0.9, v1.7) - the file is compared with the stock the
+*&   run moves (unrestricted, blocked, or QI without inspection lot, see
+*&   the transfer mode). The stock-scope block B6 of v0.9 was removed in
+*&   v1.7. P_NOQTY deactivates the file-vs-SAP quantity check (3.5); the
+*&   other checks, the allocation and the reconciliation stay active.
 *&
 *& Transfer mode (v1.0) - selection screen block B7, both options:
 *&   - 1 Unrestricted stock (P_XUNR, default): one 301, as before.
@@ -123,6 +119,13 @@
 *&   type of the material in the target plant; none when the material is
 *&   not split-valuated there. Full Validation Mode, option 1, normal run
 *&   (not on a reprocess-errors run), as the former check.
+*&
+*& Already transferred (v1.8): before posting, every line is looked up in
+*&   ZPTP_MOV_EXEC for a real 301 already posted (status S, not a
+*&   simulation) for the same material + batch and the same plant pair, in
+*&   any earlier run. When found, the line is still processed, with a
+*&   warning (ZPTP_SPLIT_VAL 057, type W) naming the latest RUN_ID, date
+*&   and material document.
 *&
 *& Execution strategies (sec.5):
 *&   - Full Validation Mode  : runs all checks 3.2 - 3.5 (default).
@@ -237,6 +240,7 @@ TYPES: BEGIN OF gty_input_raw,
          badtx TYPE bapi_msg,    " message text of the refusal
          auto  TYPE abap_bool,   " added from SAP stock, not in the file [v1.6]
          warn  TYPE bapi_msg,    " warning shown on its rows [v1.6]
+         warnno TYPE symsgno,    " message number of the warning [v1.8]
        END OF gty_input_raw.
 TYPES: gtt_input_raw TYPE STANDARD TABLE OF gty_input_raw WITH DEFAULT KEY.
 
@@ -365,7 +369,8 @@ TYPES: BEGIN OF gty_out,
          msgno      TYPE symsgno,
          message    TYPE bapi_msg,
          normbat    TYPE abap_bool,   " batch value normalised to blank
-         autowarn   TYPE bapi_msg,    " line added from SAP stock: warning [v1.6]
+         autowarn   TYPE bapi_msg,    " warning of the line (added from SAP stock, already transferred) [v1.6]
+         autono     TYPE symsgno,     " its message number [v1.8]
          sort_key   TYPE c LENGTH 1,  " display order of the status, ALV only
          rowcolor   TYPE c LENGTH 4,  " ALV row colour, ALV only
        END OF gty_out.
@@ -563,7 +568,7 @@ DATA: gt_input_raw TYPE gtt_input_raw,
       gv_run_id    TYPE zdelot_run_id,
       gv_run_seq   TYPE numc3,
       gv_run_mode  TYPE c,
-      gv_scope_txt TYPE string,                   " label of the stock scope [v0.9]
+      gv_scope_txt TYPE string,                   " stock compared with the file = stock moved [v1.7]
       gv_xfer      TYPE c,                        " transfer mode [v1.0]
       gv_move_txt  TYPE string,                   " label of the stock moved [v1.0]
       gv_posnr     TYPE numc06,
@@ -603,13 +608,25 @@ DATA: gv_sel_matnr TYPE matnr,
 SELECTION-SCREEN BEGIN OF BLOCK b3 WITH FRAME TITLE TEXT-b03.
   PARAMETERS: p_test  TYPE abap_bool DEFAULT 'X' AS CHECKBOX.    " TESTRUN (simulation), first [v1.1]
   PARAMETERS: p_job   TYPE abap_bool AS CHECKBOX.                " run as a background job [v1.5]
-  PARAMETERS: p_runid TYPE zdelot_run_id,                          " blank = new RUN_ID
-              p_reprc TYPE abap_bool AS CHECKBOX.                " reprocess error lines only
-  PARAMETERS: p_maxmt TYPE i DEFAULT 9999999.                    " max. materials per run, 0 = all [v1.4]
+  PARAMETERS: p_reprc TYPE abap_bool AS CHECKBOX.                " reprocess error lines only
   PARAMETERS: p_full  RADIOBUTTON GROUP mod DEFAULT 'X',         " Full Validation Mode
               p_dir   RADIOBUTTON GROUP mod.                     " Direct Transfer Mode
   PARAMETERS: p_noqty TYPE abap_bool AS CHECKBOX.                " deactivate the quantity check vs file [v0.9, moved v1.6]
   SELECT-OPTIONS: s_stat FOR gv_sel_stat.                        " ALV status filter, blank = all
+* input file, as a sub-block of Run control                  [v1.7]
+  SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE TEXT-b02.
+    PARAMETERS: p_srv RADIOBUTTON GROUP src                        " app server
+                      USER-COMMAND src,
+                p_loc RADIOBUTTON GROUP src DEFAULT 'X'.           " local (GUI upload), default [v1.1]
+    PARAMETERS: p_file TYPE string LOWER CASE,
+                p_sep  TYPE c DEFAULT ';'.
+  SELECTION-SCREEN END OF BLOCK b2.
+* maintenance, as a sub-block of Run control                 [v1.7]
+  SELECTION-SCREEN BEGIN OF BLOCK b4 WITH FRAME TITLE TEXT-b04.
+    PARAMETERS: p_runid TYPE zdelot_run_id.                      " blank = new RUN_ID [moved v1.7]
+    PARAMETERS: p_del TYPE abap_bool AS CHECKBOX,                  " delete RUN_ID (Z tables only)
+                p_clr TYPE abap_bool AS CHECKBOX.                  " empty ALL log tables before the run
+  SELECTION-SCREEN END OF BLOCK b4.
 SELECTION-SCREEN END OF BLOCK b3.
 
 * processing option                                          [v0.7]
@@ -626,15 +643,6 @@ SELECTION-SCREEN BEGIN OF BLOCK b7 WITH FRAME TITLE TEXT-b07.
               p_xqi  RADIOBUTTON GROUP xfr.                      " 3 QI without lot: 321 / 301 / 322
 SELECTION-SCREEN END OF BLOCK b7.
 
-* stock scope of the quantity check                          [v0.9]
-SELECTION-SCREEN BEGIN OF BLOCK b6 WITH FRAME TITLE TEXT-b06.
-  PARAMETERS: p_st1 RADIOBUTTON GROUP stk DEFAULT 'X',           " unrestricted
-              p_st2 RADIOBUTTON GROUP stk,                       " unrestricted + blocked
-              p_st3 RADIOBUTTON GROUP stk,                       " unrestricted + blocked + QI
-              p_st4 RADIOBUTTON GROUP stk,                       " blocked only
-              p_st5 RADIOBUTTON GROUP stk.                       " quality inspection only
-SELECTION-SCREEN END OF BLOCK b6.
-
 SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-b01.
   PARAMETERS: p_wsrc TYPE werks_d OBLIGATORY DEFAULT '8P01',   " source plant
               p_wdst TYPE werks_d OBLIGATORY DEFAULT '8Q01'.    " target plant
@@ -642,20 +650,8 @@ SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-b01.
                   s_charg FOR gv_sel_charg,
                   s_mtart FOR gv_sel_mtart.                     " material type
   PARAMETERS: p_budat TYPE budat DEFAULT sy-datum.              " posting date (mandatory on execution)
+  PARAMETERS: p_maxmt TYPE i DEFAULT 9999999.                    " max. materials per run, 0 = all [v1.4, moved v1.7]
 SELECTION-SCREEN END OF BLOCK b1.
-
-SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE TEXT-b02.
-  PARAMETERS: p_srv RADIOBUTTON GROUP src                        " app server
-                    USER-COMMAND src,
-              p_loc RADIOBUTTON GROUP src DEFAULT 'X'.           " local (GUI upload), default [v1.1]
-  PARAMETERS: p_file TYPE string LOWER CASE,
-              p_sep  TYPE c DEFAULT ';'.
-SELECTION-SCREEN END OF BLOCK b2.
-
-SELECTION-SCREEN BEGIN OF BLOCK b4 WITH FRAME TITLE TEXT-b04.
-  PARAMETERS: p_del TYPE abap_bool AS CHECKBOX,                  " delete RUN_ID (Z tables only)
-              p_clr TYPE abap_bool AS CHECKBOX.                  " empty ALL log tables before the run
-SELECTION-SCREEN END OF BLOCK b4.
 
 *&---------------------------------------------------------------------*
 *&  F4 help for the input file path (local and application server)
@@ -718,6 +714,7 @@ START-OF-SELECTION.
   IF p_nonspl = abap_true.
     PERFORM f_prepare_nonsplit.
     PERFORM f_apply_max_materials.                              " [v1.4]
+    PERFORM f_check_already_posted.                             " [v1.8]
     PERFORM f_process_lines.
     PERFORM f_save_logs.
   ELSE.
@@ -755,6 +752,9 @@ START-OF-SELECTION.
 
 * maximum number of materials of this run                    [v1.4]
   PERFORM f_apply_max_materials.
+
+* warning for a material + batch already transferred         [v1.8]
+  PERFORM f_check_already_posted.
 
 * 3.2 - 3.6 - process every input line
   PERFORM f_process_lines.
@@ -829,26 +829,9 @@ FORM f_f4_status.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*&      Form  F_SCOPE_QTY                                       [v0.9]
-*&      Stock of one MCHB / MARD row that belongs to the scope chosen on
-*&      the selection screen (unrestricted, blocked, quality inspection).
-*&---------------------------------------------------------------------*
-FORM f_scope_qty USING    iv_unr TYPE menge_d
-                          iv_blk TYPE menge_d
-                          iv_qi  TYPE menge_d
-                 CHANGING cv_qty TYPE menge_d.
-  cv_qty = COND #( WHEN p_st2 = abap_true THEN iv_unr + iv_blk
-                   WHEN p_st3 = abap_true THEN iv_unr + iv_blk + iv_qi
-                   WHEN p_st4 = abap_true THEN iv_blk
-                   WHEN p_st5 = abap_true THEN iv_qi
-                   ELSE iv_unr ).
-ENDFORM.
-
-*&---------------------------------------------------------------------*
 *&      Form  F_MOVE_QTY                                        [v1.0]
-*&      Quantity of one MCHB / MARD row that the transfer mode moves, and
-*&      the quantity compared with the file (stock scope of block B6 in
-*&      mode 1, the moved stock itself in modes 2 and 3). Mode 3 leaves
+*&      Quantity of one MCHB / MARD row that the transfer mode moves; it
+*&      is also the quantity compared with the file (v1.7). Mode 3 leaves
 *&      out the QI quantity held by open inspection lots.
 *&---------------------------------------------------------------------*
 FORM f_move_qty USING    iv_matnr TYPE matnr
@@ -878,8 +861,8 @@ FORM f_move_qty USING    iv_matnr TYPE matnr
       ENDIF.
       cv_scope = cv_move.
     WHEN OTHERS.
-      cv_move = iv_unr.
-      PERFORM f_scope_qty USING iv_unr iv_blk iv_qi CHANGING cv_scope.
+      cv_move  = iv_unr.
+      cv_scope = cv_move.                                       " [v1.7]
   ENDCASE.
 ENDFORM.
 
@@ -1306,15 +1289,8 @@ FORM f_init.
                           WHEN gc_xfer_qi  THEN 'QI stock without inspection lot'
                           ELSE 'unrestricted stock' ).
 
-  gv_scope_txt = COND #( WHEN p_st2 = abap_true THEN 'unrestricted + blocked stock'
-                         WHEN p_st3 = abap_true THEN 'unrestricted + blocked + QI stock'
-                         WHEN p_st4 = abap_true THEN 'blocked stock'
-                         WHEN p_st5 = abap_true THEN 'quality inspection stock'
-                         ELSE 'unrestricted stock' ).
-* modes 2 and 3: the file is compared with the stock being moved [v1.0]
-  IF gv_xfer <> gc_xfer_unr.
-    gv_scope_txt = gv_move_txt.
-  ENDIF.
+* the file is compared with the stock being moved              [v1.7]
+  gv_scope_txt = gv_move_txt.
 
   gv_run_mode = COND #( WHEN p_dir = abap_true AND p_split = abap_true
                         THEN gc_mode_dir ELSE gc_mode_full ).
@@ -2568,8 +2544,11 @@ FORM f_check_sap_not_in_file.
         lv_rule = |no valuation type, material not split-valuated in plant { p_wdst }|.
       ENDIF.
     ENDIF.
-    ls_raw-warn = |Batch not in the input file - posted with the SAP stock { ls_stk-mfree } | &&
-                  |{ ls_stk-meins } ({ gv_move_txt }), { lv_rule }|.
+    IF ls_raw-bad = abap_false.
+      ls_raw-warn   = |Batch not in the input file - posted with the SAP stock { ls_stk-mfree } | &&
+                      |{ ls_stk-meins } ({ gv_move_txt }), { lv_rule }|.
+      ls_raw-warnno = '010'.
+    ENDIF.
     APPEND ls_raw TO gt_input_raw.
 
 *   the quantity check (3.5) compares with the stock read: it passes
@@ -2710,6 +2689,65 @@ FORM f_prepare_nonsplit.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
+*&      Form  F_CHECK_ALREADY_POSTED                            [v1.8]
+*&      For every line, a real 301 already posted for the same material +
+*&      batch and the same source / target plants in an earlier run
+*&      (ZPTP_MOV_EXEC, status S, not a simulation). When found, the line
+*&      is kept and gets a warning with the latest RUN_ID, date and
+*&      material document (ZPTP_SPLIT_VAL 057).
+*&---------------------------------------------------------------------*
+FORM f_check_already_posted.
+  TYPES: BEGIN OF lty_key,
+           matnr TYPE matnr,
+           charg TYPE charg_d,
+         END OF lty_key.
+  DATA: lt_key  TYPE SORTED TABLE OF lty_key WITH UNIQUE KEY matnr charg,
+        lv_text TYPE bapi_msg.
+
+  LOOP AT gt_input_raw INTO DATA(ls_raw).
+    INSERT VALUE lty_key( matnr = ls_raw-matnr charg = ls_raw-charg ) INTO TABLE lt_key.
+  ENDLOOP.
+  IF lt_key IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  SELECT matnr, charg, run_id, run_seq, mblnr, mjahr, erdat
+    FROM zptp_mov_exec
+    FOR ALL ENTRIES IN @lt_key
+    WHERE matnr     = @lt_key-matnr
+      AND charg     = @lt_key-charg
+      AND werks_src = @p_wsrc
+      AND werks_dst = @p_wdst
+      AND status    = @gc_st_ok
+      AND testrun   = @space
+      AND bwart     = @gc_mov_type
+      AND mblnr     <> @space
+    INTO TABLE @DATA(lt_done).
+  IF lt_done IS INITIAL.
+    RETURN.
+  ENDIF.
+* latest posting first
+  SORT lt_done BY matnr charg erdat DESCENDING run_id DESCENDING run_seq DESCENDING.
+
+  LOOP AT gt_input_raw ASSIGNING FIELD-SYMBOL(<ls_raw>).
+    READ TABLE lt_done INTO DATA(ls_done)
+         WITH KEY matnr = <ls_raw>-matnr charg = <ls_raw>-charg BINARY SEARCH.
+    CHECK sy-subrc = 0.
+*   an earlier sequence of this same run is "earlier" too, except the
+*   rows this run itself is writing
+    CHECK NOT ( ls_done-run_id = gv_run_id AND ls_done-run_seq = gv_run_seq ).
+    lv_text = |Batch already transferred: RUN_ID { ls_done-run_id } seq { ls_done-run_seq } | &&
+              |on { ls_done-erdat DATE = USER }, material document { ls_done-mblnr }/{ ls_done-mjahr }|.
+    IF <ls_raw>-warn IS INITIAL.
+      <ls_raw>-warn   = lv_text.
+      <ls_raw>-warnno = '057'.
+    ELSE.
+      <ls_raw>-warn = |{ <ls_raw>-warn }; { lv_text }|.
+    ENDIF.
+  ENDLOOP.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
 *&      Form  F_APPLY_MAX_MATERIALS                             [v1.4]
 *&      P_MAXMT > 0: keeps the lines of the first P_MAXMT materials of
 *&      GT_INPUT_RAW. With a RUN_ID entered, lines already posted under
@@ -2827,6 +2865,7 @@ FORM f_process_lines.
     ls_out-meins     = ls_raw-meins.
     ls_out-normbat   = ls_raw-norm.
     ls_out-autowarn  = ls_raw-warn.                             " [v1.6]
+    ls_out-autono    = ls_raw-warnno.                           " [v1.8]
 
 *   --- NO_BATCH declaration contradicted by the material master -----
     IF ls_raw-bad = abap_true.
@@ -3707,14 +3746,17 @@ FORM f_add_log USING iv_id  TYPE symsgid
 
   ADD 1 TO gv_posnr.
 
-* line added from SAP stock (not in the file): warning on its rows,
-* message type W when the row carries no error of its own     [v1.6]
+* warning of the line (added from SAP stock, already transferred):
+* shown on every row, message type W when the row carries no error of
+* its own                                               [v1.6, v1.8]
   IF cs_out-autowarn IS NOT INITIAL.
-    IF cs_out-message NS 'Batch not in the input file'.
+    IF cs_out-message NS 'WARNING:'.
       cs_out-message = |WARNING: { cs_out-autowarn } - { cs_out-message }|.
     ENDIF.
     IF lv_ty IS INITIAL OR lv_ty = 'S'.
-      lv_id = gc_msgid. lv_no = '010'. lv_ty = 'W'.
+      lv_id = gc_msgid.
+      lv_no = COND #( WHEN cs_out-autono IS NOT INITIAL THEN cs_out-autono ELSE '010' ).
+      lv_ty = 'W'.
     ENDIF.
   ENDIF.
 

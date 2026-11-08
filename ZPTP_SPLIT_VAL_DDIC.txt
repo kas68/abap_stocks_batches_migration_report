@@ -179,6 +179,7 @@ MESSAGE CLASS  ZPTP_SPLIT_VAL  (SE91) - used by the program
 055  &1 &2 of QI stock held by inspection lots stays in plant &3 -
      not moved                                                      [v1.1]
 056  Maximum &1 materials: &2 processed, &3 left for a next run      [v1.4]
+057  Batch already transferred: RUN_ID &1 on &2, document &3        [v1.8]
 (The program passes MSGID/MSGNO together with a free text in MSGTX; the entries
  above are required so MSGID/MSGNO resolve to a text when the log is reported on.
  009 is also used when the material number cannot be converted (MATN1).

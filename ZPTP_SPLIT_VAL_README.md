@@ -1,4 +1,4 @@
-# ZPTP_SPLIT_VAL_MIG — HBM Split Valuation (program v1.1)
+# ZPTP_SPLIT_VAL_MIG — HBM Split Valuation (program v1.7)
 
 Inter-plant transfer (mvt 301) of **unrestricted** stock from source plant **8P01** to the
 new Split-Valuation plant **8Q01**. Both plants are defaults on the selection screen and stay
@@ -20,6 +20,18 @@ This repository holds the code only; version history is kept in git (the former
 - `HIGH_LEVEL_OVERVIEW.md` — non-technical overview of the program.
 - `SAP ABAP Development Standard and Namimg Conventions.docx` — the customer's development
   standards and naming conventions (Sysmex D-Project, v1.2).
+
+## What changed in v1.2 – v1.7
+
+- v1.2: server file F4 replaced by a file list of one directory (`F_F4_SERVER`, `EPS2_GET_DIRECTORY_LISTING`).
+- v1.3: file lines cleaned before splitting (`F_CLEAN_LINE`: CR, BOM, zero-width and non-breaking spaces);
+  unit converted in the logon language, then English, then as internal unit (T006).
+- v1.4: `P_MAXMT` maximum number of materials per run (default 9 999 999), message 056.
+- v1.5: `P_JOB` runs the report as a background job started immediately (`F_SUBMIT_JOB`).
+- v1.6: SAP stock missing from the file is posted with a warning (message 010, type W) instead of the
+  I / X statuses; RUN_ID first ALV column; `P_NOQTY` moved to Run control.
+- v1.7: block B6 "Stock scope" (`P_ST1`..`P_ST5`, `F_SCOPE_QTY`) removed: the file is always compared
+  with the stock that is moved. Delete text symbol `B06` and the selection texts `P_ST1`..`P_ST5`.
 
 ## What changed in v1.1 (detailed log)
 
@@ -221,11 +233,6 @@ leave *Dictionary Ref.* unticked, otherwise SAP replaces the text with the data 
 | P_XUNR | 1 Unrestricted stock |
 | P_XBLK | 2 Blocked stock |
 | P_XQI | 3 QI stock without insp. lot |
-| P_ST1 | Unrestricted stock |
-| P_ST2 | Unrestricted + blocked stock |
-| P_ST3 | Unrestricted + blocked + QI stock |
-| P_ST4 | Blocked stock only |
-| P_ST5 | Quality inspection stock only |
 | P_NOQTY | Deactivate quantity check vs file |
 | P_SPLIT | Split Valuation Materials |
 | P_NONSPL | Non split valuation materials |
@@ -249,7 +256,7 @@ leave *Dictionary Ref.* unticked, otherwise SAP replaces the text with the data 
 | P_CLR | Delete all logs before the run (P_CLR) |
 
 Text symbols: `B01`=Organizational data,
-`B05`=Processing option, `B06`=Stock scope, `B07`=Stock type transferred, `B02`=Input file, `B03`=Run control, `B04`=Maintenance.
+`B05`=Processing option, `B07`=Stock type transferred, `B02`=Input file, `B03`=Run control, `B04`=Maintenance.
 
 Program attribute *Title* (SE38 → Attributes, shown in the window title bar):
 `STOCKS & BATCHES MIGRATION PROGRAM`.
@@ -528,6 +535,43 @@ keys as the ALV sort (`STATUS` with a separator line), so the rows are grouped b
 `MSGTY` and `NORMBAT`.
 
 ## Utility report (ZPTP_SPLIT_VAL_MIG_UTILITY)
+**v0.5:** valuation type (`F_FIND_BWTAR`), always from plant 2:
+- material not split-valuated in plant 2 (MBEW header row with `BWTAR` blank has no `BWTTY`, same test as
+  ZPTP_SPLIT_VAL_MIG): `BWTAR` blank, the line is written (one line per batch, plant-level quantity, i.e.
+  storage locations summed) with the message "Not split-valuated in plant …";
+- split-valuated, batch-managed: `MCHA-BWTAR` of the batch in plant 2. Batch missing in plant 2, batch
+  without valuation type, or valuation type without MBEW segment in plant 2: red, not in the file;
+- split-valuated, not batch-managed: first valuation type in ascending order with `MBEW-STPRS <> 0`
+  (alphabetical: MBEW has no creation date). None: red, not in the file.
+
+ALV: columns *Not batch-managed* (`NOBAT`) and *Not split-valuated* (`NOSPLT`), row colour (`T_COLOR`)
+orange for not split-valuated, blue for not batch-managed (orange wins when both apply); the legend is in
+the list header. Note: lines with a blank `BWTAR` are rejected by option 1 of the migration (3.3), and
+the materials they carry are excluded from option 2.
+
+**v0.4:** block *Execution mode*. `P_ONL` *Online* (default) is unchanged: save dialog, download to the
+PC. `P_BGD` *Background*: F8 schedules the report as job `ZPTP_SPLIT_VAL_UTIL`, started immediately
+with the same selection (`F_SUBMIT_JOB`: JOB_OPEN / SUBMIT VIA JOB / JOB_CLOSE, same pattern as
+ZPTP_SPLIT_VAL_BATCH_COPY v0.7; releasing needs S_BTCH_JOB, otherwise release it in SM37). The job
+writes the file with `OPEN DATASET ... IN TEXT MODE ENCODING UTF-8` (`F_WRITE_SERVER_FILE`) to the
+directory `P_DIR` (input only in background mode, default `/tmp`; F4 opens a
+directory browser, `F_F4_DIR`: sub-directories read with the kernel calls `C_DIR_READ_START/NEXT/FINISH` (type *directory*, no authorization check on the listing, S_DATASET is checked when the job writes the file; `SUBST_GET_FILE_LIST` does not exist on the system), lines
+"Use this directory" and ".." on top, cancel keeps the field; `F4_DXFILENAME_TOPRECURSION` is not used
+for the reason given in BATCH_COPY v0.6), name
+`ZPTP_SPLIT_VAL_<plant1>_<plant2>_<stock>_<date>_<time>.csv`. The full path is in the job log; the ALV
+goes to the job spool. Download with CG3Y (transfer format ASC), or read it directly in
+ZPTP_SPLIT_VAL_MIG with the application-server option. A file that cannot be written (S_DATASET,
+directory missing) cancels the job. `P_TEST` applies: test mode writes no file. Checks on execution:
+background mode without test needs `P_DIR`; scheduling the online mode as a job (F9) without test is
+refused, as a job cannot open the save dialog.
+
+**v0.3:** option 4 *QI stock in inspection lot* (`P_XQIL`): QUANTITY = the QI stock held by open
+stock-relevant inspection lots (CINSM / INSME minus the QI without lot of option 3, i.e. QALS-LMENGEZUB
+capped at the QI stock), per storage location. Columns: Quantity (in lots, in the file) and QI total;
+QI in lots is hidden (same as Quantity). Batches with QI stock but no lot quantity are listed in yellow
+"No QI stock in inspection lots, not included". Default file name `..._QI_LOT_<date>.csv`. For analysis
+and reconciliation only: the migration does not transfer QI stock held by inspection lots.
+
 **v0.2:** block *Stock to extract* (`P_XUNR` / `P_XBLK` / `P_XQI`), same choice as the transfer mode of
 the migration: QUANTITY = unrestricted (CLABS / LABST), blocked (CSPEM / SPEME) or QI without inspection
 lot (CINSM / INSME minus QALS-LMENGEZUB of open stock-relevant lots, per storage location LAGORTCHRG). In
@@ -536,7 +580,7 @@ type. Texts are set in INITIALIZATION (no text elements to maintain).
 
 Builds the CSV input file `MATNR;CHARG;BWTAR;QUANTITY;UOM` from SAP: unrestricted stock of plant 1
 (default 8P01, MCHB per batch, MARD for non-batch materials), valuation type of plant 2 (default
-8Q01, first MBEW type in ascending order). Test mode (default on) shows the ALV only; otherwise a
+8Q01; up to v0.4 the first MBEW type in ascending order, see v0.5). Test mode (default on) shows the ALV only; otherwise a
 save dialog downloads the file. Selection: plants, `S_MATNR`, `S_CHARG`, `P_ZERO` (include
 zero-quantity lines), `P_INCL` (ALV shows only the rows included in the file; the file itself is
 not affected), `P_TEST`. The ALV shows every row read with a status (S written, Z zero quantity,

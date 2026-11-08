@@ -97,7 +97,7 @@ In simulation (P_TEST checked, the default), the program runs every check and ca
 
 ## 3. Selection screen
 
-The screen has 30 parameters in seven blocks (the "Processing option" block was added in v0.7; the outer frame titled STOCKS & BATCHES MIGRATION PROGRAM was removed). Each parameter is labelled *label (technical name)*, for example *Source plant (P_WSRC)*. Consistency checks run only on execution (F8, background job, print), not on every change on the screen. When the deletion option P_DEL is checked, only the RUN_ID is checked.
+The screen has 26 parameters in six blocks (the "Processing option" block was added in v0.7; the outer frame titled STOCKS & BATCHES MIGRATION PROGRAM was removed). Each parameter is labelled *label (technical name)*, for example *Source plant (P_WSRC)*. Consistency checks run only on execution (F8, background job, print), not on every change on the screen. When the deletion option P_DEL is checked, only the RUN_ID is checked.
 
 ### 3.0 Block "Processing option" (v0.7, P_ZBAT v0.8)
 
@@ -124,18 +124,9 @@ Modes 2 and 3:
 - The file quantity is compared with the stock being moved (blocked stock; QI stock without inspection lot); block "Stock scope" is ignored. P_NOQTY still deactivates the check.
 - Both options use the mode. A run holding any real document (status S or W) cannot be deleted with P_DEL.
 
-### 3.0b Block "Stock scope" (v0.9, mode 1 only from v1.0)
+### 3.0b Block "Stock scope" — removed in v1.7
 
-| Parameter | Label | Default | Meaning and behaviour |
-| --- | --- | --- | --- |
-| P_ST1 | Unrestricted stock | checked | Stock compared with the file and used for the "SAP stock not in file" reconciliation: unrestricted only. |
-| P_ST2 | Unrestricted + blocked stock | — | Unrestricted plus blocked stock (CSPEM / SPEME). |
-| P_ST3 | Unrestricted + blocked + QI stock | — | Plus quality inspection stock (CINSM / INSME). |
-| P_ST4 | Blocked stock only | — | Blocked stock only. |
-| P_ST5 | Quality inspection stock only | — | Quality inspection stock only. |
-| P_NOQTY | Deactivate quantity check vs file | unchecked | Skips the file-versus-SAP quantity check (step 3.5, message 004); the variance is not computed. The other checks, the allocation (005) and the reconciliation stay active. |
-
-The scope is a **check scope**. The 301 movement still moves **unrestricted stock only**: a file quantity above the unrestricted stock is blocked by the allocation check (005), whatever the scope. In option 2 the scope selects the batches considered, and the quantity moved is the unrestricted part (a batch with stock only in blocked or QI is logged with status Z, no movement). The scope applies to both options; P_NOQTY has no effect on option 2 (no file quantity).
+The file is always compared with the stock the run moves (stock type transferred: unrestricted, blocked, or QI without inspection lot). "Deactivate qty check vs file" (P_NOQTY) is now in the Run control block.
 
 ### 3.1 Block "Organizational data"
 
@@ -312,7 +303,7 @@ Errors returned by the SAP BAPIs (batch creation, goods movement) are logged wit
 
 | Program | Purpose |
 | --- | --- |
-| ZPTP_SPLIT_VAL_MIG_UTILITY (transaction ZPTP_SPLIT_VAL_UTIL) | Builds the CSV input file from SAP stock and the valuation types of the target plant. The stock extracted is chosen like the transfer mode of the migration (v0.2): unrestricted (default), blocked, or QI without inspection lot (open stock-relevant inspection lots deducted per storage location). Run it with the same choice as the migration so the file passes the quantity check. |
+| ZPTP_SPLIT_VAL_MIG_UTILITY (transaction ZPTP_SPLIT_VAL_UTIL) | Builds the CSV input file from SAP stock and the valuation types of the target plant. The stock extracted is chosen like the transfer mode of the migration (v0.2): unrestricted (default), blocked, or QI without inspection lot (open stock-relevant inspection lots deducted per storage location). Run it with the same choice as the migration so the file passes the quantity check. Option 4 (v0.3) extracts only the QI stock held by open inspection lots, for analysis and reconciliation: the migration does not transfer that stock. Execution mode (v0.4): **Online** (default) downloads the file to the PC through a save dialog, as before; **Background** runs the report as a background job (SM37) that writes the file to an application-server directory (default /tmp); the file is then downloaded with CG3Y or read directly by the migration from the application server. Valuation type (v0.5), from plant 2: batch-managed materials take the valuation type of the batch master in plant 2 (batch missing or without valuation type: line rejected); non-batch materials take the first valuation type in alphabetical order with a non-zero standard price; materials not split-valuated in plant 2 are written per batch with a blank valuation type and their plant-level quantity. The ALV highlights materials not managed by batch (blue) and not split-valuated (orange). |
 | ZPTP_SPLIT_VAL_MIG_UPLOAD (transaction ZPTP_SPLIT_VAL_UPLD) | Dialog only. Copies a file from the PC to the application server (binary copy, confirmation before overwriting), so that ZPTP_SPLIT_VAL_MIG can run as a background job with P_SRV. A background job cannot read a PC file. |
 | ZPTP_SPLIT_VAL_BATCH_COPY (transaction ZPTP_SPLIT_VAL_BCPY) | Reads a CSV file (separator ";", line 1 header; fields: material; batch; valuation type). For each line, reads the batch data at plant level in the source plant and creates the batch in the target plant with the same attributes and the valuation type of the file. Checks: columns filled, material extended and batch-managed in both plants, valuation type existing in the target plant, source batch existing, no batch with two valuation types in the file; an existing target batch is not changed (S if same valuation type, E otherwise). P_TEST (default on): checks only, no creation. Result in an ALV list, no database log. Two run modes (v0.2): **Online** (default) lists the checked items; a double-click on one item creates its batch after confirmation, and the row turns green (created or already there) or red (error). **Background** processes every item in one run (P_TEST applies), also as a job with a server file. |
 
