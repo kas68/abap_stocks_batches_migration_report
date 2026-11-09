@@ -3,7 +3,7 @@
 *&---------------------------------------------------------------------*
 *& Project : HBM - Split Valuation migration
 *& Scope   : Clearing of batch stocks / Inter-plant transfer
-*& Version : v1.8
+*& Version : v1.9
 *& Package : ZPTP_SPLIT_VAL        Message class: ZPTP_SPLIT_VAL
 *&
 *&---------------------------------------------------------------------*
@@ -127,6 +127,27 @@
 *&   warning (ZPTP_SPLIT_VAL 057, type W) naming the latest RUN_ID, date
 *&   and material document.
 *&
+*& Project stock (v1.9) - transfer mode 4 (P_XPRJ): the batches held in
+*&   project stock (special stock Q, MSPR-PRLAB, unrestricted) in the
+*&   source plant that match the selection screen (material, batch,
+*&   material type) are transferred to the same WBS element in the target
+*&   plant with one 301 Q per material + batch + WBS element (one item per
+*&   storage location, mapped by ZPTP_SLOC_MAP). No input file: the
+*&   quantities are the project stock, the valuation type is determined in
+*&   the target plant (the material is not split-valuated in the source):
+*&     - batch in the target plant with a valuation type: that one;
+*&     - batch without valuation type: the valuation type of
+*&       ZPTP_301_VALTYPE is set in the batch master (BAPI_BATCH_CHANGE);
+*&     - no batch: the batch is created as in ZPTP_SPLIT_VAL_BATCH_COPY
+*&       (F_EXTEND_BATCH: source batch attributes, classification not
+*&       copied) with the valuation type of ZPTP_301_VALTYPE.
+*&   ZPTP_301_VALTYPE: active entries of the fiscal year of the posting
+*&   date (T001W-BWKEY -> T001K-BUKRS -> T001-PERIV of the target plant),
+*&   most specific first: plant + material type, plant, material type,
+*&   generic. A failing line is logged with status W and skipped; the
+*&   next one is processed. P_SPLIT / P_NONSPL, P_FULL / P_DIR, P_NOQTY
+*&   and P_ZBAT do not apply.
+*&
 *& Execution strategies (sec.5):
 *&   - Full Validation Mode  : runs all checks 3.2 - 3.5 (default).
 *&   - Direct Transfer Mode  : bypasses the validation logic; used for
@@ -198,7 +219,9 @@ CONSTANTS:
 * transfer mode                                              [v1.0]
   gc_xfer_unr   TYPE c VALUE '1',   " unrestricted: 301
   gc_xfer_blk   TYPE c VALUE '2',   " blocked: 343 / 301 / 344
-  gc_xfer_qi    TYPE c VALUE '3'.   " quality inspection: 321 / 301 / 322
+  gc_xfer_qi    TYPE c VALUE '3',   " quality inspection: 321 / 301 / 322
+  gc_xfer_prj   TYPE c VALUE '4',   " project stock: 301 Q            [v1.9]
+  gc_sobkz_prj  TYPE sobkz VALUE 'Q'.  " special stock: project       [v1.9]
 
 CONSTANTS:
 * storage-location pool: consume / give back
@@ -241,6 +264,7 @@ TYPES: BEGIN OF gty_input_raw,
          auto  TYPE abap_bool,   " added from SAP stock, not in the file [v1.6]
          warn  TYPE bapi_msg,    " warning shown on its rows [v1.6]
          warnno TYPE symsgno,    " message number of the warning [v1.8]
+         pspnr TYPE ps_psp_pnr,  " WBS element, project stock (mode 4) [v1.9]
        END OF gty_input_raw.
 TYPES: gtt_input_raw TYPE STANDARD TABLE OF gty_input_raw WITH DEFAULT KEY.
 
@@ -371,6 +395,7 @@ TYPES: BEGIN OF gty_out,
          normbat    TYPE abap_bool,   " batch value normalised to blank
          autowarn   TYPE bapi_msg,    " warning of the line (added from SAP stock, already transferred) [v1.6]
          autono     TYPE symsgno,     " its message number [v1.8]
+         posid      TYPE ps_posid,    " WBS element, project stock (mode 4), ALV only [v1.9]
          sort_key   TYPE c LENGTH 1,  " display order of the status, ALV only
          rowcolor   TYPE c LENGTH 4,  " ALV row colour, ALV only
        END OF gty_out.
@@ -595,6 +620,35 @@ TYPES: BEGIN OF gty_qilot,
        END OF gty_qilot.
 DATA: gt_qilot TYPE SORTED TABLE OF gty_qilot WITH UNIQUE KEY matnr charg lgort.
 
+* project stock of the source plant per material / batch / WBS element /
+* storage location (transfer mode 4)                          [v1.9]
+TYPES: BEGIN OF gty_prj_loc,
+         matnr TYPE matnr,
+         charg TYPE charg_d,
+         pspnr TYPE ps_psp_pnr,
+         lgort TYPE lgort_d,
+         menge TYPE menge_d,
+       END OF gty_prj_loc.
+DATA: gt_prj_loc TYPE SORTED TABLE OF gty_prj_loc
+                 WITH UNIQUE KEY matnr charg pspnr lgort.
+
+* WBS element: internal number -> external key (PRPS-POSID)    [v1.9]
+TYPES: BEGIN OF gty_wbs,
+         pspnr TYPE ps_psp_pnr,
+         posid TYPE ps_posid,
+       END OF gty_wbs.
+DATA: gt_wbs TYPE SORTED TABLE OF gty_wbs WITH UNIQUE KEY pspnr.
+
+* valuation type rules of ZPTP_301_VALTYPE, active entries of the fiscal
+* year of the posting date, target plant or all plants        [v1.9]
+TYPES: BEGIN OF gty_vtrule,
+         werks TYPE werks_d,
+         mtart TYPE mtart,
+         bwtar TYPE bwtar_d,
+       END OF gty_vtrule.
+DATA: gt_vtrule TYPE SORTED TABLE OF gty_vtrule WITH UNIQUE KEY werks mtart,
+      gv_gjahr  TYPE gjahr.                       " fiscal year of P_BUDAT, target company code
+
 * reference fields for SELECT-OPTIONS (FOR needs a field, not a table)
 DATA: gv_sel_matnr TYPE matnr,
       gv_sel_charg TYPE charg_d,
@@ -640,7 +694,8 @@ SELECTION-SCREEN END OF BLOCK b5.
 SELECTION-SCREEN BEGIN OF BLOCK b7 WITH FRAME TITLE TEXT-b07.
   PARAMETERS: p_xunr RADIOBUTTON GROUP xfr DEFAULT 'X',          " 1 unrestricted: 301
               p_xblk RADIOBUTTON GROUP xfr,                      " 2 blocked: 343 / 301 / 344
-              p_xqi  RADIOBUTTON GROUP xfr.                      " 3 QI without lot: 321 / 301 / 322
+              p_xqi  RADIOBUTTON GROUP xfr,                      " 3 QI without lot: 321 / 301 / 322
+              p_xprj RADIOBUTTON GROUP xfr.                      " 4 project stock: 301 Q [v1.9]
 SELECTION-SCREEN END OF BLOCK b7.
 
 SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-b01.
@@ -710,8 +765,16 @@ START-OF-SELECTION.
 
   PERFORM f_init.
 
+* Transfer mode 4: project stock, no input file              [v1.9]
+  IF gv_xfer = gc_xfer_prj.
+    PERFORM f_prepare_project.
+    PERFORM f_apply_max_materials.
+    PERFORM f_check_already_posted.
+    PERFORM f_process_project.
+    PERFORM f_save_logs.
+
 * Option 2: materials NOT in the file, no split valuation   [v0.7]
-  IF p_nonspl = abap_true.
+  ELSEIF p_nonspl = abap_true.
     PERFORM f_prepare_nonsplit.
     PERFORM f_apply_max_materials.                              " [v1.4]
     PERFORM f_check_already_posted.                             " [v1.8]
@@ -1089,7 +1152,8 @@ FORM f_check_screen.
   ENDIF.
 
 * --- background job: no PC file in a job                       [v1.5]
-  IF p_job = abap_true AND p_loc = abap_true.
+*     (transfer mode 4 reads no file                           [v1.9])
+  IF p_job = abap_true AND p_loc = abap_true AND p_xprj = abap_false.
     MESSAGE 'A background job needs the file on the application server - copy it first with ZPTP_SPLIT_VAL_UPLD'
             TYPE 'E'.
   ENDIF.
@@ -1135,6 +1199,14 @@ FORM f_check_screen.
             |in table ZPTP_SLOC_MAP| TYPE 'E'.
   ENDIF.
 
+* --- transfer mode 4 (project stock): no input file           [v1.9]
+  IF p_xprj = abap_true.
+    IF p_reprc = abap_true.
+      PERFORM f_check_screen_reprc.
+    ENDIF.
+    RETURN.
+  ENDIF.
+
 * --- separator --------------------------------------------------------
   IF p_sep IS INITIAL.
     MESSAGE 'A field separator is required' TYPE 'E'.
@@ -1164,14 +1236,22 @@ FORM f_check_screen.
 
 * --- restart ----------------------------------------------------------
   IF p_reprc = abap_true.
-    IF p_runid IS INITIAL.
-      MESSAGE 'Reprocess-errors requires an existing RUN_ID' TYPE 'E'.
-    ENDIF.
-    SELECT SINGLE run_id FROM zptp_mov_exec INTO @DATA(lv_r)
-      WHERE run_id = @p_runid.
-    IF sy-subrc <> 0.
-      MESSAGE |RUN_ID { p_runid } does not exist in ZPTP_MOV_EXEC| TYPE 'E'.
-    ENDIF.
+    PERFORM f_check_screen_reprc.
+  ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_CHECK_SCREEN_REPRC                              [v1.9]
+*&      Reprocess errors: the RUN_ID must be given and exist in the log.
+*&---------------------------------------------------------------------*
+FORM f_check_screen_reprc.
+  IF p_runid IS INITIAL.
+    MESSAGE 'Reprocess-errors requires an existing RUN_ID' TYPE 'E'.
+  ENDIF.
+  SELECT SINGLE run_id FROM zptp_mov_exec INTO @DATA(lv_r)
+    WHERE run_id = @p_runid.
+  IF sy-subrc <> 0.
+    MESSAGE |RUN_ID { p_runid } does not exist in ZPTP_MOV_EXEC| TYPE 'E'.
   ENDIF.
 ENDFORM.
 
@@ -1283,17 +1363,26 @@ FORM f_init.
 * Option 2 always runs its own checks: P_DIR is ignored   [v0.7]
   gv_xfer = COND #( WHEN p_xblk = abap_true THEN gc_xfer_blk
                     WHEN p_xqi  = abap_true THEN gc_xfer_qi
+                    WHEN p_xprj = abap_true THEN gc_xfer_prj          " [v1.9]
                     ELSE gc_xfer_unr ).
   gv_move_txt = SWITCH #( gv_xfer
                           WHEN gc_xfer_blk THEN 'blocked stock'
                           WHEN gc_xfer_qi  THEN 'QI stock without inspection lot'
+                          WHEN gc_xfer_prj THEN 'project stock (Q, unrestricted)'
                           ELSE 'unrestricted stock' ).
 
 * the file is compared with the stock being moved              [v1.7]
   gv_scope_txt = gv_move_txt.
 
+* mode 4 has no file and no Direct mode: always the full checks [v1.9]
   gv_run_mode = COND #( WHEN p_dir = abap_true AND p_split = abap_true
+                                               AND gv_xfer <> gc_xfer_prj
                         THEN gc_mode_dir ELSE gc_mode_full ).
+
+* mode 4: fiscal year and valuation type rules            [v1.9]
+  IF gv_xfer = gc_xfer_prj.
+    PERFORM f_read_valtype_rules.
+  ENDIF.
 
 * RUN_ID: use given one or generate a new base id.
   IF p_runid IS INITIAL.
@@ -1316,6 +1405,11 @@ FORM f_init.
   WRITE: / 'RUN_ID:', gv_run_id, 'Seq:', gv_run_seq,
            'Mode:', COND string( WHEN gv_run_mode = gc_mode_dir
                                  THEN 'DIRECT' ELSE 'FULL' ).
+  IF gv_xfer = gc_xfer_prj.                                     " [v1.9]
+    WRITE: / 'Option: project stock, no input file - quantities from MSPR,',
+             'valuation type from plant', p_wdst, '/ ZPTP_301_VALTYPE, fiscal year', gv_gjahr.
+    WRITE: / 'Stock moved:', gv_move_txt, '(301 Q, same WBS element)'.
+  ELSE.
   WRITE: / 'Option:', COND string( WHEN p_nonspl = abap_true
                                    THEN '2 - Non split valuation materials'
                                    ELSE '1 - Split Valuation Materials' ).
@@ -1326,6 +1420,7 @@ FORM f_init.
   WRITE: / 'Stock checked:', gv_scope_txt,
            COND string( WHEN p_noqty = abap_true
                         THEN '- quantity check vs file DEACTIVATED' ELSE '' ).
+  ENDIF.
   WRITE: / 'Transfer:', p_wsrc, '->', p_wdst, '(storage locations mapped by ZPTP_SLOC_MAP)',
            'Posting date:', p_budat.
   IF p_test = abap_true.
@@ -1350,6 +1445,15 @@ FORM f_log_run_params.
   ls_out-bwart   = SWITCH #( gv_xfer WHEN gc_xfer_blk THEN '343'
                                       WHEN gc_xfer_qi  THEN '321'
                                       ELSE gc_mov_type ).
+  IF gv_xfer = gc_xfer_prj.                                     " [v1.9]
+    ls_out-message = |Run parameters: transfer mode 4 project stock (301 Q, same WBS element), | &&
+                     |no input file, valuation type: batch of plant { p_wdst } or ZPTP_301_VALTYPE | &&
+                     |fiscal year { gv_gjahr } ({ lines( gt_vtrule ) } active rule(s))| &&
+                     |{ COND string( WHEN p_reprc = abap_true THEN ', reprocess errors only' ) }| &&
+                     |{ COND string( WHEN p_maxmt > 0 THEN |, max. { p_maxmt } materials| ) }|.
+    PERFORM f_add_log USING gc_msgid '054' 'W' CHANGING ls_out.
+    RETURN.
+  ENDIF.
   ls_out-message = |Run parameters: option { COND string( WHEN p_nonspl = abap_true
                                                           THEN '2 non split' ELSE '1 split' ) }| &&
                    |, transfer mode { SWITCH string( gv_xfer
@@ -3144,6 +3248,656 @@ FORM f_process_lines.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
+*&      Form  F_READ_VALTYPE_RULES                              [v1.9]
+*&      Transfer mode 4: fiscal year of the posting date in the company
+*&      code of the target plant (T001W-BWKEY -> T001K-BUKRS ->
+*&      T001-PERIV), then the active ZPTP_301_VALTYPE entries of that
+*&      year for the target plant or for all plants (WERKS blank).
+*&---------------------------------------------------------------------*
+FORM f_read_valtype_rules.
+  DATA lv_periv TYPE periv.
+
+  CLEAR: gt_vtrule, gv_gjahr.
+
+  SELECT SINGLE bwkey FROM t001w INTO @DATA(lv_bwkey)
+    WHERE werks = @p_wdst.
+  SELECT SINGLE bukrs FROM t001k INTO @DATA(lv_bukrs)
+    WHERE bwkey = @lv_bwkey.
+  IF sy-subrc <> 0.
+    MESSAGE |No company code for valuation area { lv_bwkey } of plant { p_wdst } (T001K)| TYPE 'E'.
+  ENDIF.
+  SELECT SINGLE periv FROM t001 INTO @lv_periv
+    WHERE bukrs = @lv_bukrs.
+  IF sy-subrc <> 0 OR lv_periv IS INITIAL.
+    MESSAGE |No fiscal year variant for company code { lv_bukrs } (T001-PERIV)| TYPE 'E'.
+  ENDIF.
+
+  CALL FUNCTION 'DATE_TO_PERIOD_CONVERT'
+    EXPORTING  i_date         = p_budat
+               i_periv        = lv_periv
+    IMPORTING  e_gjahr        = gv_gjahr
+    EXCEPTIONS input_false    = 1
+               t009_notfound  = 2
+               t009b_notfound = 3
+               OTHERS         = 4.
+  IF sy-subrc <> 0.
+    MESSAGE |Fiscal year of posting date { p_budat DATE = USER } cannot be determined | &&
+            |(fiscal year variant { lv_periv }, return code { sy-subrc })| TYPE 'E'.
+  ENDIF.
+
+  SELECT werks, mtart, bwtar FROM zptp_301_valtype
+    INTO CORRESPONDING FIELDS OF TABLE @gt_vtrule
+    WHERE gjahr  =  @gv_gjahr
+      AND active =  @abap_true
+      AND ( werks = @p_wdst OR werks = @space ).
+  IF gt_vtrule IS INITIAL.
+*   not blocking: batches of the target plant that already carry a
+*   valuation type do not need a rule
+    DATA(lv_txt) = |No active entry in ZPTP_301_VALTYPE for plant { p_wdst } and fiscal year | &&
+                   |{ gv_gjahr }: only batches that already have a valuation type in { p_wdst } | &&
+                   |can be transferred|.
+    WRITE: / lv_txt COLOR COL_NEGATIVE.
+  ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_VALTYPE_RULE                                    [v1.9]
+*&      Valuation type of ZPTP_301_VALTYPE for a material type, most
+*&      specific entry first: plant + material type, plant only, material
+*&      type only, generic. An entry without valuation type is ignored.
+*&      Blank when no entry matches.
+*&---------------------------------------------------------------------*
+FORM f_valtype_rule USING    iv_mtart TYPE mtart
+                    CHANGING cv_bwtar TYPE bwtar_d
+                             cv_rule  TYPE string.
+  DATA: lt_try  TYPE STANDARD TABLE OF gty_vtrule WITH DEFAULT KEY,
+        ls_rule TYPE gty_vtrule.
+
+  CLEAR: cv_bwtar, cv_rule.
+  lt_try = VALUE #( ( werks = p_wdst mtart = iv_mtart )
+                    ( werks = p_wdst mtart = space )
+                    ( werks = space  mtart = iv_mtart )
+                    ( werks = space  mtart = space ) ).
+  LOOP AT lt_try INTO DATA(ls_try).
+    READ TABLE gt_vtrule INTO ls_rule
+         WITH TABLE KEY werks = ls_try-werks mtart = ls_try-mtart.
+    IF sy-subrc = 0 AND ls_rule-bwtar IS NOT INITIAL.
+      cv_bwtar = ls_rule-bwtar.
+      cv_rule  = |ZPTP_301_VALTYPE { COND string( WHEN ls_try-werks IS INITIAL THEN `*` ELSE ls_try-werks ) }| &&
+                 |/{ COND string( WHEN ls_try-mtart IS INITIAL THEN `*` ELSE ls_try-mtart ) }/{ gv_gjahr }|.
+      RETURN.
+    ENDIF.
+  ENDLOOP.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_PREPARE_PROJECT                                 [v1.9]
+*&      Transfer mode 4: project stock (special stock Q) of the source
+*&      plant, unrestricted (MSPR-PRLAB), batches only, restricted by the
+*&      selection screen (material, batch, material type). One line in
+*&      GT_INPUT_RAW per material + batch + WBS element carrying the whole
+*&      project stock; GT_PRJ_LOC keeps it per storage location.
+*&      Reprocess errors: the material + batch in error or warning (not
+*&      posted) in the previous sequence of the RUN_ID.
+*&---------------------------------------------------------------------*
+FORM f_prepare_project.
+  TYPES: BEGIN OF lty_sum,
+           matnr TYPE matnr,
+           charg TYPE charg_d,
+           pspnr TYPE ps_psp_pnr,
+           menge TYPE menge_d,
+         END OF lty_sum.
+  DATA: lt_sum  TYPE SORTED TABLE OF lty_sum WITH UNIQUE KEY matnr charg pspnr,
+        ls_sum  TYPE lty_sum,
+        ls_loc  TYPE gty_prj_loc,
+        ls_raw  TYPE gty_input_raw,
+        ls_src  TYPE gty_marc,
+        lt_prev TYPE gtt_badkey,
+        lv_prev TYPE numc3.
+
+  CLEAR: gt_input_raw, gt_prj_loc, gt_wbs.
+
+  PERFORM f_read_marc.
+
+* restart: material + batch not posted in the previous sequence
+  IF p_reprc = abap_true.
+    lv_prev = gv_run_seq - 1.
+    IF lv_prev >= 1.
+      SELECT DISTINCT matnr, charg INTO TABLE @lt_prev
+        FROM zptp_mov_exec
+        WHERE run_id  =  @gv_run_id
+          AND run_seq =  @lv_prev
+          AND status  IN (@gc_st_err, @gc_st_warn)
+          AND mblnr   =  @space
+          AND matnr   <> @space.
+    ENDIF.
+    IF lt_prev IS INITIAL.
+      MESSAGE 'No error lines to reprocess for this RUN_ID' TYPE 'I'.
+      RETURN.
+    ENDIF.
+  ENDIF.
+
+  SELECT matnr, lgort, charg, pspnr, prlab
+    FROM mspr
+    INTO TABLE @DATA(lt_mspr)
+    WHERE werks =  @p_wsrc
+      AND matnr IN @s_matnr
+      AND charg IN @s_charg
+      AND sobkz =  @gc_sobkz_prj
+      AND charg <> @space
+      AND prlab >  0.
+
+  LOOP AT lt_mspr INTO DATA(ls_mspr).
+    READ TABLE gt_marc INTO ls_src
+         WITH TABLE KEY matnr = ls_mspr-matnr werks = p_wsrc.
+    CHECK sy-subrc = 0 AND ls_src-mtart IN s_mtart.
+    IF p_reprc = abap_true.
+      READ TABLE lt_prev TRANSPORTING NO FIELDS
+           WITH TABLE KEY matnr = ls_mspr-matnr charg = ls_mspr-charg.
+      CHECK sy-subrc = 0.
+    ENDIF.
+
+    CLEAR ls_loc.
+    ls_loc-matnr = ls_mspr-matnr.
+    ls_loc-charg = ls_mspr-charg.
+    ls_loc-pspnr = ls_mspr-pspnr.
+    ls_loc-lgort = ls_mspr-lgort.
+    ls_loc-menge = ls_mspr-prlab.
+    COLLECT ls_loc INTO gt_prj_loc.
+
+    CLEAR ls_sum.
+    ls_sum-matnr = ls_mspr-matnr.
+    ls_sum-charg = ls_mspr-charg.
+    ls_sum-pspnr = ls_mspr-pspnr.
+    ls_sum-menge = ls_mspr-prlab.
+    COLLECT ls_sum INTO lt_sum.
+  ENDLOOP.
+
+  IF lt_sum IS INITIAL.
+    MESSAGE |No project stock (special stock Q) in plant { p_wsrc } for the selection| TYPE 'I'.
+    RETURN.
+  ENDIF.
+
+* external key of the WBS elements (BAPI field VAL_WBS_ELEM)
+  SELECT pspnr, posid FROM prps
+    INTO CORRESPONDING FIELDS OF TABLE @gt_wbs
+    FOR ALL ENTRIES IN @lt_sum
+    WHERE pspnr = @lt_sum-pspnr.
+
+  LOOP AT lt_sum INTO ls_sum.
+    READ TABLE gt_marc INTO ls_src
+         WITH TABLE KEY matnr = ls_sum-matnr werks = p_wsrc.
+    CLEAR ls_raw.
+    ls_raw-matnr = ls_sum-matnr.
+    ls_raw-charg = ls_sum-charg.
+    ls_raw-pspnr = ls_sum-pspnr.
+    ls_raw-menge = ls_sum-menge.
+    ls_raw-meins = ls_src-meins.
+    APPEND ls_raw TO gt_input_raw.
+  ENDLOOP.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_PROCESS_PROJECT                                 [v1.9]
+*&      Transfer mode 4, per material + batch + WBS element:
+*&        1  material extended to and batch-managed in the target plant;
+*&        2  valuation type in the target plant (F_PRJ_VALTYPE), once per
+*&           material + batch;
+*&        3  receiving storage locations (ZPTP_SLOC_MAP, T001L);
+*&        4  batch in the target plant: created (F_EXTEND_BATCH, the logic
+*&           of ZPTP_SPLIT_VAL_BATCH_COPY) or valuation type set
+*&           (F_SET_BATCH_VALTYPE), once per material + batch;
+*&        5  301 Q to the same WBS element (F_POST_301_PRJ).
+*&      A failing line is logged with status W and skipped.
+*&---------------------------------------------------------------------*
+FORM f_process_project.
+  TYPES: BEGIN OF lty_vt,
+           matnr TYPE matnr,
+           charg TYPE charg_d,
+           bwtar TYPE bwtar_d,
+           act   TYPE c LENGTH 1,     " blank: batch ok, C: set valuation type, N: create batch
+           ok    TYPE abap_bool,
+           id    TYPE symsgid,
+           no    TYPE symsgno,
+           msg   TYPE bapi_msg,
+           info  TYPE bapi_msg,       " origin of the valuation type
+         END OF lty_vt.
+  DATA: lt_vt    TYPE SORTED TABLE OF lty_vt WITH UNIQUE KEY matnr charg,
+        ls_vt    TYPE lty_vt,
+        lt_done  TYPE gtt_done,
+        ls_done  TYPE gty_done,
+        ls_raw   TYPE gty_input_raw,
+        ls_out   TYPE gty_out,
+        ls_dst   TYPE gty_marc,
+        ls_loc   TYPE gty_prj_loc,
+        lt_alloc TYPE gtt_alloc,
+        ls_alloc TYPE gty_alloc,
+        lv_posid TYPE ps_posid,
+        lv_mblnr TYPE mblnr,
+        lv_mjahr TYPE mjahr,
+        lv_msg   TYPE bapi_msg,
+        lv_id    TYPE symsgid,
+        lv_no    TYPE symsgno,
+        lv_ty    TYPE symsgty,
+        lv_cerr  TYPE abap_bool,
+        lv_cmsg  TYPE bapi_msg,
+        lv_lgmis TYPE lgort_d,
+        lv_nomap TYPE lgort_d,
+        lv_noid  TYPE symsgid,
+        lv_nono  TYPE symsgno.
+
+  LOOP AT gt_input_raw INTO ls_raw.
+
+    CLEAR: ls_out, lt_alloc, lv_mblnr, lv_mjahr, lv_msg, lv_id, lv_no, lv_ty,
+           lv_cerr, lv_cmsg, lv_lgmis, lv_nomap, lv_posid.
+
+    READ TABLE gt_wbs INTO DATA(ls_wbs) WITH TABLE KEY pspnr = ls_raw-pspnr.
+    IF sy-subrc = 0.
+      lv_posid = ls_wbs-posid.
+    ELSE.
+      lv_posid = ls_raw-pspnr.
+    ENDIF.
+
+    ls_out-matnr     = ls_raw-matnr.
+    ls_out-charg     = ls_raw-charg.
+    ls_out-xchpf     = gc_xchpf.
+    ls_out-qty_input = ls_raw-menge.
+    ls_out-qty_sap   = ls_raw-menge.
+    ls_out-meins     = ls_raw-meins.
+    ls_out-posid     = lv_posid.
+    ls_out-autowarn  = ls_raw-warn.
+    ls_out-autono    = ls_raw-warnno.
+
+*   every storage location of the project stock is moved
+    LOOP AT gt_prj_loc INTO ls_loc
+         WHERE matnr = ls_raw-matnr AND charg = ls_raw-charg AND pspnr = ls_raw-pspnr.
+      APPEND VALUE gty_alloc( lgort = ls_loc-lgort menge = ls_loc-menge ) TO lt_alloc.
+    ENDLOOP.
+
+*   --- 1. material in the target plant -----------------------------
+    READ TABLE gt_marc INTO ls_dst
+         WITH TABLE KEY matnr = ls_raw-matnr werks = p_wdst.
+    IF sy-subrc <> 0.
+      ls_out-message = |WBS { lv_posid }: material { ls_raw-matnr } is not extended to plant | &&
+                       |{ p_wdst } - line skipped|.
+      PERFORM f_prj_skip USING gc_msgid '014' lt_alloc CHANGING ls_out.
+      CONTINUE.
+    ENDIF.
+    IF ls_dst-batchmgd = abap_false.
+      ls_out-message = |WBS { lv_posid }: material { ls_raw-matnr } is not batch-managed in plant | &&
+                       |{ p_wdst } - line skipped|.
+      PERFORM f_prj_skip USING gc_msgid '026' lt_alloc CHANGING ls_out.
+      CONTINUE.
+    ENDIF.
+
+*   --- 2. valuation type in the target plant, once per batch -------
+    READ TABLE lt_vt INTO ls_vt WITH TABLE KEY matnr = ls_raw-matnr charg = ls_raw-charg.
+    IF sy-subrc <> 0.
+      PERFORM f_prj_valtype USING ls_raw-matnr ls_raw-charg ls_dst-mtart
+                            CHANGING ls_vt-bwtar ls_vt-act ls_vt-ok ls_vt-id ls_vt-no
+                                     ls_vt-msg ls_vt-info.
+      ls_vt-matnr = ls_raw-matnr.
+      ls_vt-charg = ls_raw-charg.
+      INSERT ls_vt INTO TABLE lt_vt.
+      IF ls_vt-ok = abap_true AND ls_vt-act IS INITIAL.
+        PERFORM f_add_ext_log USING ls_raw-matnr ls_raw-charg gc_st_ok abap_true
+                                    'S' lv_noid lv_nono ls_vt-info.
+      ENDIF.
+    ENDIF.
+    ls_out-bwtar = ls_vt-bwtar.
+    IF ls_vt-ok = abap_false.
+      ls_out-message = |WBS { lv_posid }: { ls_vt-msg } - line skipped|.
+      PERFORM f_prj_skip USING ls_vt-id ls_vt-no lt_alloc CHANGING ls_out.
+      CONTINUE.
+    ENDIF.
+
+*   --- 3. receiving storage locations ------------------------------
+    LOOP AT lt_alloc ASSIGNING FIELD-SYMBOL(<ls_alloc>).
+      READ TABLE gt_sloc_map INTO DATA(ls_map)
+           WITH TABLE KEY lgort_src = <ls_alloc>-lgort.
+      IF sy-subrc <> 0.
+        lv_nomap = <ls_alloc>-lgort.
+        EXIT.
+      ENDIF.
+      <ls_alloc>-lgort_dst = ls_map-lgort_dst.
+      READ TABLE gt_lgort_dst TRANSPORTING NO FIELDS
+           WITH TABLE KEY table_line = <ls_alloc>-lgort_dst.
+      IF sy-subrc <> 0.
+        lv_lgmis = <ls_alloc>-lgort_dst.
+        EXIT.
+      ENDIF.
+    ENDLOOP.
+    IF lv_nomap IS NOT INITIAL.
+      ls_out-message = |WBS { lv_posid }: no mapping for storage location { lv_nomap } of plant | &&
+                       |{ p_wsrc } to plant { p_wdst } in ZPTP_SLOC_MAP - line skipped|.
+      PERFORM f_prj_skip USING gc_msgid '024' lt_alloc CHANGING ls_out.
+      CONTINUE.
+    ENDIF.
+    IF lv_lgmis IS NOT INITIAL.
+      ls_out-message = |WBS { lv_posid }: storage location { lv_lgmis } does not exist in plant | &&
+                       |{ p_wdst } - line skipped|.
+      PERFORM f_prj_skip USING gc_msgid '023' lt_alloc CHANGING ls_out.
+      CONTINUE.
+    ENDIF.
+
+*   rows pending so far must survive a BAPI rollback
+    PERFORM f_flush_logs CHANGING lv_cerr lv_cmsg.
+    CLEAR: lv_cerr, lv_cmsg.
+
+*   --- 4. batch in the target plant, once per batch ----------------
+    IF ls_vt-act IS NOT INITIAL.
+      READ TABLE lt_done INTO ls_done
+           WITH KEY matnr = ls_raw-matnr charg = ls_raw-charg.
+      IF sy-subrc <> 0.
+        CLEAR ls_done.
+        ls_done-matnr = ls_raw-matnr.
+        ls_done-charg = ls_raw-charg.
+        IF ls_vt-act = 'N'.
+          PERFORM f_extend_batch USING ls_raw-matnr ls_raw-charg ls_vt-bwtar
+                                 CHANGING ls_done-ok ls_done-msg
+                                          ls_done-id ls_done-no ls_done-ty.
+        ELSE.
+          PERFORM f_set_batch_valtype USING ls_raw-matnr ls_raw-charg ls_vt-bwtar
+                                      CHANGING ls_done-ok ls_done-msg
+                                               ls_done-id ls_done-no ls_done-ty.
+        ENDIF.
+        INSERT ls_done INTO TABLE lt_done.
+      ENDIF.
+      IF ls_done-ok = abap_false.
+        ls_out-message = |WBS { lv_posid }: batch { COND string( WHEN ls_vt-act = 'N'
+                                                                  THEN `creation` ELSE `update` ) } | &&
+                         |failed in plant { p_wdst } - line skipped. { ls_done-msg }|.
+        PERFORM f_prj_skip USING ls_done-id ls_done-no lt_alloc CHANGING ls_out.
+        CONTINUE.
+      ENDIF.
+    ENDIF.
+
+*   --- 5. 301 Q to the same WBS element ----------------------------
+    PERFORM f_post_301_prj USING ls_raw lt_alloc ls_vt-bwtar lv_posid
+                           CHANGING lv_mblnr lv_mjahr lv_msg lv_id lv_no lv_ty.
+    IF lv_mblnr IS INITIAL.
+      ls_out-message = |WBS { lv_posid }: 301 Q failed - line skipped. { lv_msg }|.
+      PERFORM f_prj_skip USING lv_id lv_no lt_alloc CHANGING ls_out.
+      CONTINUE.
+    ENDIF.
+
+    ls_out-status  = COND #( WHEN p_test = abap_true THEN gc_st_test ELSE gc_st_ok ).
+    ls_out-mblnr   = lv_mblnr.
+    ls_out-mjahr   = lv_mjahr.
+    ls_out-message = |WBS { lv_posid }: | &&
+                     |{ COND string( WHEN p_test = abap_true
+                                     THEN `Simulation OK - 301 Q checked (TESTRUN), no document`
+                                     ELSE |Material document { lv_mblnr }/{ lv_mjahr } (301 Q)| ) }| &&
+                     |, valuation type { ls_vt-bwtar } ({ ls_vt-info })|.
+    LOOP AT lt_alloc INTO ls_alloc.
+      ls_out-lgort_src  = ls_alloc-lgort.
+      ls_out-lgort_dst  = ls_alloc-lgort_dst.
+      ls_out-menge_post = ls_alloc-menge.
+      PERFORM f_add_log USING lv_id lv_no lv_ty CHANGING ls_out.
+    ENDLOOP.
+
+*   the posting and its log rows in one LUW
+    PERFORM f_flush_logs CHANGING lv_cerr lv_cmsg.
+
+    IF lv_cerr = abap_true AND p_test = abap_false.
+      DATA(lv_utxt) = CONV natxt( |WBS { lv_posid }: update failed after commit - document | &&
+                                  |{ lv_mblnr } not posted. { lv_cmsg }| ).
+      UPDATE zptp_mov_exec
+         SET status = @gc_st_warn, msgty = 'W', msgid = @gc_msgid,
+             msgno  = '022', msgtx = @lv_utxt
+       WHERE run_id  = @gv_run_id
+         AND run_seq = @gv_run_seq
+         AND mblnr   = @lv_mblnr
+         AND mjahr   = @lv_mjahr.
+      COMMIT WORK.
+      LOOP AT gt_out ASSIGNING FIELD-SYMBOL(<ls_upd>)
+           WHERE mblnr = lv_mblnr AND mjahr = lv_mjahr.
+        <ls_upd>-status  = gc_st_warn.
+        <ls_upd>-msgty   = 'W'.
+        <ls_upd>-msgid   = gc_msgid.
+        <ls_upd>-msgno   = '022'.
+        <ls_upd>-message = lv_utxt.
+      ENDLOOP.
+    ENDIF.
+  ENDLOOP.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_PRJ_SKIP                                        [v1.9]
+*&      Transfer mode 4: a line that cannot be transferred is logged with
+*&      status W (message type W), one row per storage location of its
+*&      project stock, and skipped. CS_OUT-MESSAGE is set by the caller.
+*&---------------------------------------------------------------------*
+FORM f_prj_skip USING    iv_id    TYPE symsgid
+                         iv_no    TYPE symsgno
+                         it_alloc TYPE gtt_alloc
+                CHANGING cs_out   TYPE gty_out.
+  DATA ls_alloc TYPE gty_alloc.
+
+  cs_out-status = gc_st_warn.
+  CLEAR: cs_out-mblnr, cs_out-mjahr.
+  IF it_alloc IS INITIAL.
+    PERFORM f_add_log USING iv_id iv_no 'W' CHANGING cs_out.
+    RETURN.
+  ENDIF.
+  LOOP AT it_alloc INTO ls_alloc.
+    cs_out-lgort_src  = ls_alloc-lgort.
+    cs_out-lgort_dst  = ls_alloc-lgort_dst.
+    cs_out-menge_post = ls_alloc-menge.
+    PERFORM f_add_log USING iv_id iv_no 'W' CHANGING cs_out.
+  ENDLOOP.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_PRJ_VALTYPE                                     [v1.9]
+*&      Transfer mode 4: valuation type of a batch in the target plant.
+*&        batch with a valuation type      -> that one, CV_ACT blank;
+*&        batch without valuation type     -> ZPTP_301_VALTYPE, CV_ACT C;
+*&        no batch in the target plant     -> ZPTP_301_VALTYPE, CV_ACT N.
+*&      The valuation type must exist for the material in the target plant
+*&      (MBEW), as in ZPTP_SPLIT_VAL_BATCH_COPY.
+*&---------------------------------------------------------------------*
+FORM f_prj_valtype USING    iv_matnr TYPE matnr
+                            iv_charg TYPE charg_d
+                            iv_mtart TYPE mtart
+                   CHANGING cv_bwtar TYPE bwtar_d
+                            cv_act   TYPE c
+                            cv_ok    TYPE abap_bool
+                            cv_id    TYPE symsgid
+                            cv_no    TYPE symsgno
+                            cv_msg   TYPE bapi_msg
+                            cv_info  TYPE bapi_msg.
+  DATA: lv_exist TYPE abap_bool,
+        lv_rule  TYPE string.
+
+  CLEAR: cv_bwtar, cv_act, cv_ok, cv_id, cv_no, cv_msg, cv_info.
+
+  SELECT SINGLE bwtar FROM mcha INTO @DATA(lv_bwtar)
+    WHERE matnr = @iv_matnr AND werks = @p_wdst AND charg = @iv_charg.
+  lv_exist = xsdbool( sy-subrc = 0 ).
+
+  IF lv_exist = abap_true AND lv_bwtar IS NOT INITIAL.
+    cv_bwtar = lv_bwtar.
+    cv_info  = |batch { iv_charg } of plant { p_wdst }|.
+  ELSE.
+    cv_act = COND #( WHEN lv_exist = abap_true THEN 'C' ELSE 'N' ).
+    PERFORM f_valtype_rule USING iv_mtart CHANGING cv_bwtar lv_rule.
+    IF cv_bwtar IS INITIAL.
+      cv_id  = gc_msgid. cv_no = '058'.
+      cv_msg = |no active entry in ZPTP_301_VALTYPE for plant { p_wdst }, material type | &&
+               |{ iv_mtart }, fiscal year { gv_gjahr } - batch { iv_charg } | &&
+               |{ COND string( WHEN lv_exist = abap_true THEN `has no valuation type`
+                                                         ELSE `does not exist` ) } in plant { p_wdst }|.
+      RETURN.
+    ENDIF.
+    cv_info = |{ lv_rule }, batch { COND string( WHEN cv_act = 'C' THEN `valuation type set`
+                                                                   ELSE `created` ) }|.
+  ENDIF.
+
+  IF lcl_help=>is_segment_created( iv_matnr = iv_matnr
+                                   iv_bwkey = p_wdst
+                                   iv_bwtar = cv_bwtar ) = abap_false.
+    cv_id  = gc_msgid. cv_no = '003'.
+    cv_msg = |valuation type { cv_bwtar } ({ cv_info }) not created for material { iv_matnr } | &&
+             |in target plant { p_wdst }|.
+    RETURN.
+  ENDIF.
+
+  cv_ok = abap_true.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_SET_BATCH_VALTYPE                               [v1.9]
+*&      Transfer mode 4: valuation type set on a batch of the target plant
+*&      that has none (BAPI_BATCH_CHANGE + COMMIT). Simulation: nothing is
+*&      changed.
+*&---------------------------------------------------------------------*
+FORM f_set_batch_valtype USING    iv_matnr TYPE matnr
+                                  iv_charg TYPE charg_d
+                                  iv_bwtar TYPE bwtar_d
+                         CHANGING cv_ok  TYPE abap_bool
+                                  cv_msg TYPE bapi_msg
+                                  cv_id  TYPE symsgid
+                                  cv_no  TYPE symsgno
+                                  cv_ty  TYPE symsgty.
+  DATA: ls_att  TYPE bapibatchatt,
+        ls_attx TYPE bapibatchattx,
+        lt_ret  TYPE STANDARD TABLE OF bapiret2,
+        ls_ret  TYPE bapiret2,
+        lv_bmat TYPE bapibatchkey-material,
+        lv_noid TYPE symsgid,
+        lv_nono TYPE symsgno.
+
+  CLEAR: cv_ok, cv_msg, cv_id, cv_no, cv_ty.
+  lv_bmat = iv_matnr.
+
+  IF p_test = abap_true.
+    cv_ok  = abap_true.
+    cv_msg = |Simulation: valuation type { iv_bwtar } would be set on batch { iv_charg } | &&
+             |in plant { p_wdst }|.
+    PERFORM f_add_ext_log USING iv_matnr iv_charg gc_st_test abap_true
+                                space lv_noid lv_nono cv_msg.
+    RETURN.
+  ENDIF.
+
+  ls_att-val_type  = iv_bwtar.
+  ls_attx-val_type = abap_true.
+  CALL FUNCTION 'BAPI_BATCH_CHANGE'
+    EXPORTING material         = lv_bmat
+              batch            = iv_charg
+              plant            = p_wdst
+              batchattributes  = ls_att
+              batchattributesx = ls_attx
+    TABLES    return           = lt_ret.
+
+  LOOP AT lt_ret INTO ls_ret WHERE type CA 'EA'.
+    EXIT.
+  ENDLOOP.
+  IF sy-subrc = 0.
+    CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+    cv_ok = abap_false.
+    cv_id = ls_ret-id. cv_no = ls_ret-number. cv_ty = ls_ret-type.
+    cv_msg = |Valuation type { iv_bwtar } cannot be set on batch { iv_charg } in plant | &&
+             |{ p_wdst }: { ls_ret-message }|.
+    PERFORM f_add_ext_log USING iv_matnr iv_charg gc_st_err abap_true
+                                ls_ret-type ls_ret-id ls_ret-number cv_msg.
+  ELSE.
+    CALL FUNCTION 'BAPI_TRANSACTION_COMMIT' EXPORTING wait = abap_true.
+    cv_ok  = abap_true.
+    cv_msg = |Valuation type { iv_bwtar } set on batch { iv_charg } in plant { p_wdst }|.
+    PERFORM f_add_ext_log USING iv_matnr iv_charg gc_st_ok abap_true
+                                'S' gc_msgid '059' cv_msg.
+  ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_POST_301_PRJ                                    [v1.9]
+*&      Transfer mode 4: 301 of project stock (special stock Q) to the
+*&      same WBS element in the target plant. One document per material +
+*&      batch + WBS element, one item per issuing storage location, the
+*&      receiving one from ZPTP_SLOC_MAP. The valuation type goes on the
+*&      receiving side (MOVE_VAL_TYPE), the source plant is not
+*&      split-valuated. No commit here (see F_POST_301).
+*&---------------------------------------------------------------------*
+FORM f_post_301_prj USING is_raw   TYPE gty_input_raw
+                          it_alloc TYPE gtt_alloc
+                          iv_bwtar TYPE bwtar_d
+                          iv_posid TYPE ps_posid
+                    CHANGING cv_mblnr TYPE mblnr
+                             cv_mjahr TYPE mjahr
+                             cv_msg   TYPE bapi_msg
+                             cv_id    TYPE symsgid
+                             cv_no    TYPE symsgno
+                             cv_ty    TYPE symsgty.
+
+  DATA: ls_head  TYPE bapi2017_gm_head_01,
+        ls_code  TYPE bapi2017_gm_code,
+        lt_item  TYPE STANDARD TABLE OF bapi2017_gm_item_create,
+        ls_item  TYPE bapi2017_gm_item_create,
+        ls_alloc TYPE gty_alloc,
+        lt_ret   TYPE STANDARD TABLE OF bapiret2,
+        ls_ret   TYPE bapiret2,
+        lv_doc   TYPE bapi2017_gm_head_ret-mat_doc,
+        lv_year  TYPE bapi2017_gm_head_ret-doc_year.
+
+  CLEAR: cv_mblnr, cv_mjahr, cv_msg, cv_id, cv_no, cv_ty.
+
+  ls_head-pstng_date = p_budat.
+  ls_head-doc_date   = sy-datum.
+  ls_head-header_txt = 'HBM Split Val'.
+  ls_code-gm_code    = gc_gm_code.
+
+  LOOP AT it_alloc INTO ls_alloc.
+    CLEAR ls_item.
+    ls_item-material      = is_raw-matnr.
+    ls_item-plant         = p_wsrc.
+    ls_item-stge_loc      = ls_alloc-lgort.
+    ls_item-batch         = is_raw-charg.
+    ls_item-move_type     = gc_mov_type.
+    ls_item-spec_stock    = gc_sobkz_prj.        " project stock
+    ls_item-val_wbs_elem  = iv_posid.            " WBS element, kept on the receiving side
+    ls_item-entry_qnt     = ls_alloc-menge.
+    ls_item-entry_uom     = is_raw-meins.
+    ls_item-move_plant    = p_wdst.
+    ls_item-move_stloc    = ls_alloc-lgort_dst.
+    ls_item-move_batch    = is_raw-charg.
+    ls_item-move_val_type = iv_bwtar.
+    APPEND ls_item TO lt_item.
+  ENDLOOP.
+
+  IF lt_item IS INITIAL.
+    cv_msg = 'No project stock by storage location - nothing posted'.
+    RETURN.
+  ENDIF.
+
+  CALL FUNCTION 'BAPI_GOODSMVT_CREATE'
+    EXPORTING goodsmvt_header  = ls_head
+              goodsmvt_code    = ls_code
+              testrun          = p_test
+    IMPORTING materialdocument = lv_doc
+              matdocumentyear  = lv_year
+    TABLES    goodsmvt_item    = lt_item
+              return           = lt_ret.
+
+  READ TABLE lt_ret INTO ls_ret WITH KEY type = 'E'.
+  IF sy-subrc <> 0.
+    READ TABLE lt_ret INTO ls_ret WITH KEY type = 'A'.
+  ENDIF.
+  IF sy-subrc = 0.
+    CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+    cv_id = ls_ret-id. cv_no = ls_ret-number. cv_ty = ls_ret-type.
+    cv_msg = ls_ret-message.
+  ELSEIF p_test = abap_true.
+    CALL FUNCTION 'BAPI_TRANSACTION_ROLLBACK'.
+    cv_mblnr = 'SIMULATED'.
+    cv_mjahr = p_budat(4).
+  ELSE.
+    cv_mblnr = lv_doc.
+    cv_mjahr = lv_year.
+  ENDIF.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
 *&      Form  F_ZERO_BATCH                                      [v0.8]
 *&      P_ZBAT: batch of a zero-quantity line created in the target
 *&      plant, no movement. Only for a batch-managed material with a
@@ -3950,6 +4704,9 @@ FORM f_display_alv.
   add_col 'CHARG'      'Batch'.
   add_col 'XCHPF'      'BatchMgd'.
   add_col 'BWTAR'      'Val.Type'.
+  IF gv_xfer = gc_xfer_prj.                                     " [v1.9]
+    add_col 'POSID'    'WBS element'.
+  ENDIF.
   add_col 'WERKS_SRC'  'Src Plant'.
   add_col 'LGORT_SRC'  'Src SLoc'.
   add_col 'WERKS_DST'  'Dst Plant'.

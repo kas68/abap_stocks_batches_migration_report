@@ -3,7 +3,7 @@
 *&---------------------------------------------------------------------*
 *& Project : HBM - Split Valuation migration
 *& Scope   : Preparation of the Valuation Type Input File
-*& Version : v0.5
+*& Version : v0.6
 *& Package : ZPTP_SPLIT_VAL
 *&
 *&---------------------------------------------------------------------*
@@ -18,7 +18,8 @@
 *&     MATNR;CHARG;BWTAR;QUANTITY;UOM
 *&
 *&   MATNR    material number
-*&   CHARG    batch, from plant 1 (blank for non-batch-managed material)
+*&   CHARG    batch, from plant 1 (NO_BATCH for non-batch-managed
+*&            material, v0.6)
 *&   BWTAR    valuation type, from plant 2
 *&   QUANTITY unrestricted stock of the batch in plant 1
 *&   UOM      base unit of measure
@@ -29,7 +30,10 @@
 *& Processing rules:
 *&   - Stock = unrestricted stock (MCHB-CLABS), summed over the storage
 *&     locations of plant 1. Non-batch-managed materials: MARD-LABST,
-*&     summed over the storage locations, with a blank batch.
+*&     summed over the storage locations, with a blank batch; the
+*&     file carries NO_BATCH in the batch column (v0.6), so that
+*&     ZPTP_SPLIT_VAL_MIG verifies the declaration against the material
+*&     master of both plants (messages 013 / 014 / 015).
 *&   - Material not extended to plant 2                 -> not in file.
 *&   - Valuation type (v0.5), always from plant 2:
 *&       - material not split-valuated in plant 2 (MBEW header row,
@@ -103,6 +107,9 @@ CONSTANTS:
   gc_xchpf   TYPE marc-xchpf VALUE 'X',
   gc_sep     TYPE c          VALUE ';',
   gc_header  TYPE string     VALUE 'MATNR;CHARG;BWTAR;QUANTITY;UOM',
+* batch column of a non-batch-managed material, as declared to
+* ZPTP_SPLIT_VAL_MIG (its GC_NO_BATCH list)                    [v0.6]
+  gc_no_batch TYPE charg_d   VALUE 'NO_BATCH',
 * status codes of the ALV
   gc_st_ok   TYPE c VALUE 'S',   " written to the file
   gc_st_zero TYPE c VALUE 'Z',   " zero quantity, left out
@@ -902,7 +909,11 @@ FORM f_build_file.
     IF sy-subrc <> 0.
       lv_uom = ls_out-meins.
     ENDIF.
-    APPEND |{ ls_out-matnr ALPHA = OUT }{ gc_sep }{ ls_out-charg }{ gc_sep }| &&
+*   non-batch-managed material: NO_BATCH declaration, not blank [v0.6]
+    DATA(lv_charg) = COND charg_d( WHEN ls_out-nobat = abap_true AND ls_out-charg IS INITIAL
+                                   THEN gc_no_batch
+                                   ELSE ls_out-charg ).
+    APPEND |{ ls_out-matnr ALPHA = OUT }{ gc_sep }{ lv_charg }{ gc_sep }| &&
            |{ ls_out-bwtar }{ gc_sep }{ lv_qty }{ gc_sep }{ lv_uom }|
            TO gt_file.
   ENDLOOP.

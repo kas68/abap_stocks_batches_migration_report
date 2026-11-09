@@ -141,6 +141,39 @@ Example:
   8P01       QA01       8Q01       0100
 
 ================================================================================
+TABLE  ZPTP_301_VALTYPE   "Valuation type of project-stock batches      [v1.9]
+================================================================================
+Delivery class C            Data maintenance: Display/Maintenance Allowed
+Field         Key  Element / Type       Description
+--------------------------------------------------------------------------------
+MANDT          X   MANDT                 Client
+WERKS          X   WERKS_D               Plant (blank = all plants)
+MTART          X   MTART                 Material type (blank = all types)
+GJAHR          X   GJAHR                 Fiscal year
+BWTAR              BWTAR_D               Valuation type to set
+DESCR              TEXT40                Comment
+ACTIVE             XFELD                 Entry active flag
+
+Technical: buffering off, size category 0. No foreign key on WERKS / MTART
+(blank is a valid value). Maintenance: SM30 as for ZPTP_SLOC_MAP.
+
+Read by transfer mode 4 (project stock, P_XPRJ) for a batch that has no
+valuation type in the target plant, or does not exist there. Only ACTIVE = X
+entries of the fiscal year of the posting date are used; the fiscal year comes
+from the fiscal year variant of the company code of the target plant
+(T001W-BWKEY -> T001K-BUKRS -> T001-PERIV, DATE_TO_PERIOD_CONVERT). Most
+specific entry first: WERKS = target plant + MTART, WERKS = target plant +
+MTART blank, WERKS blank + MTART, both blank. An entry with BWTAR blank is
+ignored. The valuation type must exist for the material in the target plant
+(MBEW), otherwise the line is skipped (003).
+
+Example:
+  WERKS  MTART  GJAHR  BWTAR   ACTIVE
+  8Q01   ZROH   2026   NEW     X
+  8Q01          2026   NEW     X
+                2026   NEW     X
+
+================================================================================
 MESSAGE CLASS  ZPTP_SPLIT_VAL  (SE91) - used by the program
 ================================================================================
 002  Zero quantity in input file - no movement created
@@ -180,6 +213,9 @@ MESSAGE CLASS  ZPTP_SPLIT_VAL  (SE91) - used by the program
      not moved                                                      [v1.1]
 056  Maximum &1 materials: &2 processed, &3 left for a next run      [v1.4]
 057  Batch already transferred: RUN_ID &1 on &2, document &3        [v1.8]
+058  No active entry in ZPTP_301_VALTYPE for plant &1, material type &2,
+     fiscal year &3                                                 [v1.9]
+059  Valuation type &1 set on batch &2 in plant &3                  [v1.9]
 (The program passes MSGID/MSGNO together with a free text in MSGTX; the entries
  above are required so MSGID/MSGNO resolve to a text when the log is reported on.
  009 is also used when the material number cannot be converted (MATN1).

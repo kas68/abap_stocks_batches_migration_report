@@ -46,6 +46,29 @@ This repository holds the code only; version history is kept in git (the former
 - Messages 054 and 055 to create in SE91. Anything counting `ZPTP_MOV_EXEC` rows per file line must
   filter on `BWART = '301'`.
 
+## What changed in v1.9 (project stock transfer)
+
+Block B7: `P_XPRJ` (mode 4, `GC_XFER_PRJ`): batches in project stock (special stock Q) of the source
+plant, transferred to the same WBS element in the target plant with a 301 Q. No input file.
+- `F_PREPARE_PROJECT`: `MSPR` (`SOBKZ` = Q, `PRLAB` > 0, batch not blank) filtered by `S_MATNR`,
+  `S_CHARG`, `S_MTART`; one `GT_INPUT_RAW` line per material + batch + WBS element (`PSPNR`), the stock
+  per storage location in `GT_PRJ_LOC`; WBS external key from `PRPS-POSID` (`GT_WBS`).
+  `F_APPLY_MAX_MATERIALS` and `F_CHECK_ALREADY_POSTED` run unchanged on these lines.
+- `F_READ_VALTYPE_RULES` (from `F_INIT`): fiscal year of `P_BUDAT` in the company code of the target
+  plant (T001W → T001K → T001-PERIV, `DATE_TO_PERIOD_CONVERT`), active `ZPTP_301_VALTYPE` rules of that
+  year. `F_VALTYPE_RULE`: plant + type, plant, type, generic.
+- `F_PROCESS_PROJECT`: target-plant material checks (014, 026), `F_PRJ_VALTYPE` (batch valuation type,
+  else rule 058; MBEW segment check 003), storage-location mapping (024, 023), then the batch: created by
+  `F_EXTEND_BATCH` (same logic as `ZPTP_SPLIT_VAL_BATCH_COPY`, classification not copied) or valuation
+  type set by `F_SET_BATCH_VALTYPE` (`BAPI_BATCH_CHANGE`, 059), then `F_POST_301_PRJ` (`SPEC_STOCK` = Q,
+  `VAL_WBS_ELEM`, `MOVE_VAL_TYPE`). Every failure: status W via `F_PRJ_SKIP`, next line.
+- Reprocess errors in mode 4: material + batch with status E or W and no document in the previous sequence.
+- ALV column *WBS element* (`POSID`, mode 4 only); in ZPTP_MOV_EXEC the WBS element is at the start of MSGTX.
+- To verify in the sandbox: receiving WBS element of the 301 Q with `VAL_WBS_ELEM` only; `BAPI_BATCH_CHANGE`
+  on `VAL_TYPE` of a batch of the target plant; the simulation of a 301 Q into a batch not yet created /
+  without valuation type.
+- New DDIC: table `ZPTP_301_VALTYPE`, messages 058, 059; selection text `P_XPRJ`.
+
 ## What changed in v1.0 (blocked and QI stock transfer)
 
 Block B7: `P_XUNR` (mode 1, 301 only, default), `P_XBLK` (mode 2: 343 / 301 / 344), `P_XQI` (mode 3:
@@ -233,6 +256,7 @@ leave *Dictionary Ref.* unticked, otherwise SAP replaces the text with the data 
 | P_XUNR | 1 Unrestricted stock |
 | P_XBLK | 2 Blocked stock |
 | P_XQI | 3 QI stock without insp. lot |
+| P_XPRJ | 4 Project stock (Q) |
 | P_NOQTY | Deactivate quantity check vs file |
 | P_SPLIT | Split Valuation Materials |
 | P_NONSPL | Non split valuation materials |
@@ -535,6 +559,11 @@ keys as the ALV sort (`STATUS` with a separator line), so the rows are grouped b
 `MSGTY` and `NORMBAT`.
 
 ## Utility report (ZPTP_SPLIT_VAL_MIG_UTILITY)
+**v0.6:** non-batch-managed materials (MARD stock) are written with `NO_BATCH` in the batch column
+instead of a blank (constant `GC_NO_BATCH`, `F_BUILD_FILE`). The migration therefore verifies the
+declaration against the material master of both plants and the batch stock (013 / 014 / 015) instead
+of accepting a blank unchecked. The ALV still shows a blank batch, with *Not batch-managed* ticked.
+
 **v0.5:** valuation type (`F_FIND_BWTAR`), always from plant 2:
 - material not split-valuated in plant 2 (MBEW header row with `BWTAR` blank has no `BWTTY`, same test as
   ZPTP_SPLIT_VAL_MIG): `BWTAR` blank, the line is written (one line per batch, plant-level quantity, i.e.
