@@ -176,7 +176,7 @@ Le fichier est un fichier texte à plat, avec une ligne par combinaison article 
 | Position | Colonne | Obligatoire | Contenu et règles |
 | --- | --- | --- | --- |
 | 1 | MATNR | oui | Numéro d'article, avec ou sans zéros de tête (conversion standard SAP). Vide : ligne rejetée (009). |
-| 2 | CHARG | non | Numéro de lot pour un article géré en lot. Pour un article non géré en lot : vide ou NO_BATCH (voir 4.3). |
+| 2 | CHARG | non | Numéro de lot pour un article géré en lot. Un lot numérique est rapproché d'abord avec les zéros de tête (0000000123), puis sans (123). Pour un article non géré en lot : vide ou NO_BATCH (voir 4.3). |
 | 3 | BWTAR | oui | Type de valorisation cible dans l'usine 8Q01. Vide : ligne rejetée (009). |
 | 4 | QUANTITY | oui | Quantité à transférer, dans l'unité de base de l'article. Non numérique : rejet (007). Négative : rejet (008). Zéro : aucun mouvement (statut Z). |
 | 5 | UOM | non | Unité de mesure. Elle doit être l'unité de base de l'article (MARA-MEINS). Inconnue : rejet (017). Différente de l'unité de base : rejet (018). Vide : l'unité de base est retenue. |

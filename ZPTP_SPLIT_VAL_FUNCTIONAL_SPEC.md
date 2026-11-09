@@ -177,7 +177,7 @@ The input file is a flat text file with one line per material / batch / valuatio
 | Position | Column | Mandatory | Content and rules |
 | --- | --- | --- | --- |
 | 1 | MATNR | yes | Material number, with or without leading zeros (standard SAP conversion). Blank: line rejected (009). |
-| 2 | CHARG | no | Batch number for a batch-managed material. For a non-batch-managed material: blank or NO_BATCH (see 4.3). |
+| 2 | CHARG | no | Batch number for a batch-managed material. A numeric batch is matched with leading zeros first (0000000123), then without them (123). For a non-batch-managed material: blank or NO_BATCH (see 4.3). |
 | 3 | BWTAR | yes | Target valuation type in plant 8Q01. Blank: line rejected (009). |
 | 4 | QUANTITY | yes | Quantity to transfer, in the material's base unit. Non-numeric: rejected (007). Negative: rejected (008). Zero: no movement (status Z). |
 | 5 | UOM | no | Unit of measure. Must be the material's base unit (MARA-MEINS). Unknown: rejected (017). Different from the base unit: rejected (018). Blank: the base unit is used. |

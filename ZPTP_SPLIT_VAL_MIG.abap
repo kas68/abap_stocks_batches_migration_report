@@ -3,7 +3,7 @@
 *&---------------------------------------------------------------------*
 *& Project : HBM - Split Valuation migration
 *& Scope   : Clearing of batch stocks / Inter-plant transfer
-*& Version : v1.9
+*& Version : v1.10
 *& Package : ZPTP_SPLIT_VAL        Message class: ZPTP_SPLIT_VAL
 *&
 *&---------------------------------------------------------------------*
@@ -147,6 +147,15 @@
 *&   generic. A failing line is logged with status W and skipped; the
 *&   next one is processed. P_SPLIT / P_NONSPL, P_FULL / P_DIR, P_NOQTY
 *&   and P_ZBAT do not apply.
+*&
+*& Batch number of the file (v1.10): a numeric batch is normalised with
+*&   leading zeros to 10 characters (123 -> 0000000123) and matched
+*&   first in that form against the batches of the source plant (MCHA);
+*&   when it does not exist there, the batch without leading zeros is
+*&   tried. The batch found replaces the file value for every later
+*&   step (stock, reconciliation, batch creation, posting, logs). When
+*&   neither exists the normalised batch is kept. Non-numeric batches
+*&   are compared as written (upper case). F_RESOLVE_BATCH.
 *&
 *& Execution strategies (sec.5):
 *&   - Full Validation Mode  : runs all checks 3.2 - 3.5 (default).
@@ -436,6 +445,16 @@ CLASS lcl_help DEFINITION.
     CLASS-METHODS is_no_batch
       IMPORTING iv_charg TYPE charg_d
       RETURNING VALUE(rv_no) TYPE abap_bool.
+*   Numeric batch completed with leading zeros to 10 characters;
+*   any other value unchanged                                [v1.10]
+    CLASS-METHODS norm_batch
+      IMPORTING iv_charg TYPE charg_d
+      RETURNING VALUE(rv_charg) TYPE charg_d.
+*   Numeric batch without its leading zeros; a batch of zeros only or
+*   a non-numeric value unchanged                            [v1.10]
+    CLASS-METHODS strip_batch
+      IMPORTING iv_charg TYPE charg_d
+      RETURNING VALUE(rv_charg) TYPE charg_d.
 *   Buffers the valuation segments of one valuation area   [v0.3-25]
     CLASS-METHODS load_mbew
       IMPORTING iv_bwkey TYPE bwkey
@@ -572,6 +591,30 @@ CLASS lcl_help IMPLEMENTATION.
 
   METHOD is_no_batch.
     rv_no = is_in_list( iv_val = iv_charg iv_list = gc_no_batch ).
+  ENDMETHOD.
+
+  METHOD norm_batch.                                            " [v1.10]
+    rv_charg = iv_charg.
+    CONDENSE rv_charg NO-GAPS.
+    IF rv_charg IS INITIAL OR rv_charg CN '0123456789 '.
+      rv_charg = iv_charg.
+      RETURN.
+    ENDIF.
+    SHIFT rv_charg RIGHT DELETING TRAILING space.
+    OVERLAY rv_charg WITH '0000000000'.
+  ENDMETHOD.
+
+  METHOD strip_batch.                                           " [v1.10]
+    rv_charg = iv_charg.
+    CONDENSE rv_charg NO-GAPS.
+    IF rv_charg IS INITIAL OR rv_charg CN '0123456789 '.
+      rv_charg = iv_charg.
+      RETURN.
+    ENDIF.
+    SHIFT rv_charg LEFT DELETING LEADING '0'.
+    IF rv_charg IS INITIAL.
+      rv_charg = iv_charg.
+    ENDIF.
   ENDMETHOD.
 ENDCLASS.
 
@@ -794,6 +837,8 @@ START-OF-SELECTION.
   PERFORM f_filter_mtart.
   PERFORM f_validate_no_batch.
   PERFORM f_normalise_batch.
+* batch number: normalised (leading zeros) first, then without [v1.10]
+  PERFORM f_resolve_batch.
 * unit of measure and one valuation type per batch       [v0.3-16, 19]
   PERFORM f_validate_lines.
 
@@ -2117,6 +2162,70 @@ FORM f_validate_no_batch.
       IF sy-subrc <> 0.
         INSERT lv_mat INTO TABLE gt_badmat.
       ENDIF.
+    ENDIF.
+  ENDLOOP.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_RESOLVE_BATCH                                   [v1.10]
+*&      Batch number of the file matched against the batches of the
+*&      source plant (MCHA), before the aggregation since it changes the
+*&      Material + Batch key:
+*&        1. the batch normalised with leading zeros (0000000123);
+*&        2. when that one does not exist, the batch without leading
+*&           zeros (123);
+*&        3. neither exists: the normalised batch is kept, and the line
+*&           is reported by the usual checks (006 no stock).
+*&      Non-numeric batches are left as written.
+*&---------------------------------------------------------------------*
+FORM f_resolve_batch.
+
+  TYPES: BEGIN OF lty_key,
+           matnr TYPE matnr,
+           charg TYPE charg_d,
+         END OF lty_key.
+  DATA: lt_key   TYPE STANDARD TABLE OF lty_key WITH DEFAULT KEY,
+        lt_mcha  TYPE SORTED TABLE OF lty_key WITH UNIQUE KEY matnr charg,
+        lv_norm  TYPE charg_d,
+        lv_strip TYPE charg_d.
+
+* candidates of every line: normalised and without leading zeros
+  LOOP AT gt_input_raw INTO DATA(ls_raw) WHERE charg IS NOT INITIAL.
+    lv_norm  = lcl_help=>norm_batch( ls_raw-charg ).
+    lv_strip = lcl_help=>strip_batch( ls_raw-charg ).
+    APPEND VALUE #( matnr = ls_raw-matnr charg = lv_norm ) TO lt_key.
+    IF lv_strip <> lv_norm.
+      APPEND VALUE #( matnr = ls_raw-matnr charg = lv_strip ) TO lt_key.
+    ENDIF.
+  ENDLOOP.
+  IF lt_key IS INITIAL.
+    RETURN.
+  ENDIF.
+  SORT lt_key BY matnr charg.
+  DELETE ADJACENT DUPLICATES FROM lt_key COMPARING matnr charg.
+
+  SELECT matnr, charg FROM mcha
+    FOR ALL ENTRIES IN @lt_key
+    WHERE matnr = @lt_key-matnr
+      AND werks = @p_wsrc
+      AND charg = @lt_key-charg
+    INTO CORRESPONDING FIELDS OF TABLE @lt_mcha.
+
+  LOOP AT gt_input_raw ASSIGNING FIELD-SYMBOL(<ls_raw>) WHERE charg IS NOT INITIAL.
+    lv_norm  = lcl_help=>norm_batch( <ls_raw>-charg ).
+    lv_strip = lcl_help=>strip_batch( <ls_raw>-charg ).
+    READ TABLE lt_mcha TRANSPORTING NO FIELDS
+         WITH TABLE KEY matnr = <ls_raw>-matnr charg = lv_norm.
+    IF sy-subrc = 0.
+      <ls_raw>-charg = lv_norm.
+      CONTINUE.
+    ENDIF.
+    READ TABLE lt_mcha TRANSPORTING NO FIELDS
+         WITH TABLE KEY matnr = <ls_raw>-matnr charg = lv_strip.
+    IF sy-subrc = 0.
+      <ls_raw>-charg = lv_strip.
+    ELSE.
+      <ls_raw>-charg = lv_norm.
     ENDIF.
   ENDLOOP.
 ENDFORM.

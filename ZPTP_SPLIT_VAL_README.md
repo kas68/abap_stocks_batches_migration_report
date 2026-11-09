@@ -46,6 +46,17 @@ This repository holds the code only; version history is kept in git (the former
 - Messages 054 and 055 to create in SE91. Anything counting `ZPTP_MOV_EXEC` rows per file line must
   filter on `BWART = '301'`.
 
+## What changed in v1.10 (batch number with leading zeros)
+- `F_RESOLVE_BATCH`, called after `F_NORMALISE_BATCH` and before the aggregation: a numeric batch of the
+  file is normalised with leading zeros to 10 characters (`LCL_HELP=>NORM_BATCH`, `123` → `0000000123`)
+  and matched first in that form against MCHA of the source plant (one `FOR ALL ENTRIES` read); when it
+  does not exist, the batch without leading zeros (`LCL_HELP=>STRIP_BATCH`, `123`) is tried. The batch
+  found replaces the file value for every later step. Neither found: the normalised batch is kept and the
+  line ends in 006 as before. Non-numeric batches are compared as written (upper case).
+- Same rule in `ZPTP_SPLIT_VAL_BATCH_COPY` v0.9 (`F_CHECK_SOURCE_BATCH`, `F_NORM_BATCH`, `F_STRIP_BATCH`),
+  which replaces the v0.4 fallback (as written first, then completed with zeros). The ALV message notes
+  when the batch used differs from the file value.
+
 ## What changed in v1.9 (project stock transfer)
 
 Block B7: `P_XPRJ` (mode 4, `GC_XFER_PRJ`): batches in project stock (special stock Q) of the source
@@ -442,6 +453,11 @@ batch-managed in 8P01 (`BATCHMGD` off), which catches a convention nobody declar
 
 One `ZPTP_SPLIT_VAL 012` row per run reports how many lines were normalised, and each affected record
 carries "(batch value normalised to blank)" in its message.
+
+### Leading zeros (v1.10)
+A numeric batch number is matched normalised with leading zeros first (`0000000123`), then without
+them (`123`), against the batches of 8P01 (`F_RESOLVE_BATCH`). A CSV saved from Excel that lost the
+zeros is therefore still matched.
 
 ## Input validation (v0.2)
 Unusable file lines are **rejected and logged** with status `E` instead of being dropped

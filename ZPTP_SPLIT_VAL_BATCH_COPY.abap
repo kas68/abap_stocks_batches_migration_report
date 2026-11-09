@@ -4,7 +4,7 @@
 *& Project : HBM - Split Valuation migration
 *& Scope   : Copy of batch master data from the source plant to the
 *&           target plant, enriched with the valuation type of a file
-*& Version : v0.8
+*& Version : v0.9
 *& Package : ZPTP_SPLIT_VAL
 *&
 *&---------------------------------------------------------------------*
@@ -31,9 +31,12 @@
 *&     both (MARC-XCHPF or MARA-XCHPF);
 *&   - the valuation type exists in the target plant (MBEW-BWTAR);
 *&   - the source batch exists in the source plant (MCHA, checked before
-*&     any creation); a numeric batch whose leading zeros were lost (CSV
-*&     saved from Excel) is completed with zeros when that batch exists
-*&     [v0.4];
+*&     any creation). v0.9: a numeric batch is normalised with leading
+*&     zeros to 10 characters and looked up first in that form; when it
+*&     does not exist, it is looked up without leading zeros. The batch
+*&     found is the one used; when neither exists the line is rejected
+*&     and shows the normalised batch. Non-numeric batches are compared
+*&     as written (upper case);
 *&   - a batch already existing in the target plant is not recreated:
 *&     status S if its valuation type is the one of the file, E if not
 *&     (a batch carries one valuation type);
@@ -696,51 +699,99 @@ FORM f_check_items.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*&      Form  F_CHECK_SOURCE_BATCH                              [v0.4]
+*&      Form  F_CHECK_SOURCE_BATCH                        [v0.4, v0.9]
 *&      The batch of the file must exist in the source plant, otherwise
-*&      BAPI_BATCH_GET_DETAIL fails at creation. A numeric batch without
-*&      its leading zeros (lost when the CSV is saved from Excel) is
-*&      completed to 10 characters when that batch exists.
+*&      BAPI_BATCH_GET_DETAIL fails at creation. A numeric batch is
+*&      normalised with leading zeros (10 characters) and matched first
+*&      in that form; when it does not exist, the batch without leading
+*&      zeros is tried. Neither found: the line is rejected and carries
+*&      the normalised batch.
 *&---------------------------------------------------------------------*
 FORM f_check_source_batch.
-  DATA: lv_full TYPE charg_d,
-        lv_x    TYPE charg_d.
+  DATA: lv_norm  TYPE charg_d,
+        lv_strip TYPE charg_d,
+        lv_file  TYPE charg_d,
+        lv_x     TYPE charg_d.
 
   LOOP AT gt_item ASSIGNING FIELD-SYMBOL(<ls_item>)
        WHERE bad = abap_false AND matnr IS NOT INITIAL AND charg IS NOT INITIAL.
 
+    lv_file = <ls_item>-charg.
+    PERFORM f_norm_batch  USING lv_file CHANGING lv_norm.
+    PERFORM f_strip_batch USING lv_file CHANGING lv_strip.
+
+*   1. normalised batch (leading zeros)
     SELECT SINGLE charg FROM mcha INTO @lv_x
       WHERE matnr = @<ls_item>-matnr
         AND werks = @p_wsrc
-        AND charg = @<ls_item>-charg.
+        AND charg = @lv_norm.
     IF sy-subrc = 0.
+      <ls_item>-charg = lv_norm.
+      IF lv_norm <> lv_file.
+        <ls_item>-note = |batch { lv_file } of the file normalised to { lv_norm }|.
+      ENDIF.
       CONTINUE.
     ENDIF.
 
-*   numeric batch shorter than 10 characters: try with leading zeros
-    CLEAR lv_full.
-    IF <ls_item>-charg CO '0123456789 ' AND strlen( <ls_item>-charg ) < 10.
-      lv_full = <ls_item>-charg.
-      SHIFT lv_full RIGHT DELETING TRAILING space.
-      OVERLAY lv_full WITH '0000000000'.
+*   2. batch without leading zeros
+    IF lv_strip <> lv_norm.
       SELECT SINGLE charg FROM mcha INTO @lv_x
         WHERE matnr = @<ls_item>-matnr
           AND werks = @p_wsrc
-          AND charg = @lv_full.
+          AND charg = @lv_strip.
       IF sy-subrc = 0.
-        <ls_item>-note  = |batch { <ls_item>-charg } of the file completed to { lv_full }|.
-        <ls_item>-charg = lv_full.
+        <ls_item>-charg = lv_strip.
+        IF lv_strip <> lv_file.
+          <ls_item>-note = |batch { lv_file } of the file matched as { lv_strip } (without leading zeros)|.
+        ENDIF.
         CONTINUE.
       ENDIF.
     ENDIF.
 
-    <ls_item>-bad = abap_true.
-    <ls_item>-msg = |Batch { <ls_item>-charg } of material { <ls_item>-matnr ALPHA = OUT } | &&
-                    |does not exist in plant { p_wsrc }| &&
-                    |{ COND string( WHEN lv_full IS NOT INITIAL
-                                    THEN | (nor { lv_full })| ) }| &&
-                    | - check the batch number in the file (leading zeros?)|.
+    <ls_item>-charg = lv_norm.
+    <ls_item>-bad   = abap_true.
+    <ls_item>-msg   = |Batch { lv_norm } of material { <ls_item>-matnr ALPHA = OUT } | &&
+                      |does not exist in plant { p_wsrc }| &&
+                      |{ COND string( WHEN lv_strip <> lv_norm
+                                      THEN | (nor { lv_strip })| ) }| &&
+                      | - check the batch number in the file|.
   ENDLOOP.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_NORM_BATCH                                      [v0.9]
+*&      Numeric batch -> right-aligned, completed with leading zeros to
+*&      10 characters (0000000123). Any other value is returned as is.
+*&---------------------------------------------------------------------*
+FORM f_norm_batch USING    iv_charg TYPE charg_d
+                  CHANGING cv_norm  TYPE charg_d.
+  cv_norm = iv_charg.
+  CONDENSE cv_norm NO-GAPS.
+  IF cv_norm IS INITIAL OR cv_norm CN '0123456789 '.
+    cv_norm = iv_charg.
+    RETURN.
+  ENDIF.
+  SHIFT cv_norm RIGHT DELETING TRAILING space.
+  OVERLAY cv_norm WITH '0000000000'.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_STRIP_BATCH                                     [v0.9]
+*&      Numeric batch -> without leading zeros (123). A batch made of
+*&      zeros only, or a non-numeric batch, is returned as is.
+*&---------------------------------------------------------------------*
+FORM f_strip_batch USING    iv_charg TYPE charg_d
+                   CHANGING cv_strip TYPE charg_d.
+  cv_strip = iv_charg.
+  CONDENSE cv_strip NO-GAPS.
+  IF cv_strip IS INITIAL OR cv_strip CN '0123456789 '.
+    cv_strip = iv_charg.
+    RETURN.
+  ENDIF.
+  SHIFT cv_strip LEFT DELETING LEADING '0'.
+  IF cv_strip IS INITIAL.
+    cv_strip = iv_charg.
+  ENDIF.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
