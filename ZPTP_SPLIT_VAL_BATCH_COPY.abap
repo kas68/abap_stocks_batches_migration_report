@@ -4,44 +4,52 @@
 *& Project : HBM - Split Valuation migration
 *& Scope   : Copy of batch master data from the source plant to the
 *&           target plant, enriched with the valuation type of a file
-*& Version : v0.9
+*& Version : v1.0
 *& Package : ZPTP_SPLIT_VAL
 *&
 *&---------------------------------------------------------------------*
 *& Description
 *&---------------------------------------------------------------------*
-*& Reads a CSV file (separator ';', UTF-8 or Windows-1252) made of one
-*& header line and several item lines:            [v0.3, was .xlsx]
+*& v1.0 - the run is driven by the batches of the source plant, not by
+*& the file. Every batch of the source plant (default 8P01, MCHA, not
+*& flagged for deletion, within S_MATNR / S_CHARG) is extended to the
+*& target plant (default 8Q01): the batch data at plant level is read in
+*& the source plant (BAPI_BATCH_GET_DETAIL) and the batch is created in
+*& the target plant (BAPI_BATCH_CREATE) with the same attributes. No
+*& stock movement is posted. The valuation type depends on the material
+*& in the target plant:
+*&   - split-valuated (MBEW header row with a valuation category BWTTY,
+*&     same test as ZPTP_SPLIT_VAL_MIG): the valuation type is taken from
+*&     the file line with the same Material + Batch. No such line: error,
+*&     the batch is not copied;
+*&   - not split-valuated: the batch is copied without valuation type; a
+*&     valuation type given by the file is ignored (noted in the message).
+*&
+*& The CSV file (separator ';', UTF-8 or Windows-1252) has one header
+*& line and item lines                              [v0.3, was .xlsx]
 *&
 *&     MATERIAL;BATCH;VALUATION TYPE
 *&
-*&     field 1  material number
-*&     field 2  batch
-*&     field 3  valuation type
+*& It only supplies the valuation types of the split-valuated materials.
+*& Batch matching (v0.9): a numeric batch of the file is normalised with
+*& leading zeros to 10 characters and matched first in that form against
+*& the source batches; when that fails, the form without leading zeros
+*& is tried. Non-numeric batches are compared as written (upper case).
 *&
-*& For every item the report reads the batch data at plant level in the
-*& source plant (default 8P01, BAPI_BATCH_GET_DETAIL) and creates the
-*& batch record at plant level in the target plant (default 8Q01,
-*& BAPI_BATCH_CREATE) with the same attributes, the valuation type being
-*& the one of the file. No stock movement is posted.
-*&
-*& Checks per item (the item is rejected with status E otherwise):
-*&   - the three columns are filled, the material number is convertible;
-*&   - the material is extended to both plants and is batch-managed in
-*&     both (MARC-XCHPF or MARA-XCHPF);
-*&   - the valuation type exists in the target plant (MBEW-BWTAR);
-*&   - the source batch exists in the source plant (MCHA, checked before
-*&     any creation). v0.9: a numeric batch is normalised with leading
-*&     zeros to 10 characters and looked up first in that form; when it
-*&     does not exist, it is looked up without leading zeros. The batch
-*&     found is the one used; when neither exists the line is rejected
-*&     and shows the normalised batch. Non-numeric batches are compared
-*&     as written (upper case);
+*& Checks per batch (status E, batch not copied, otherwise):
+*&   - the material is extended to the target plant and batch-managed in
+*&     both plants (MARC-XCHPF or MARA-XCHPF);
+*&   - split-valuated material: a file line exists for the batch, carries
+*&     a valuation type, the valuation type exists in the target plant
+*&     (MBEW-BWTAR), and the file gives only one valuation type for it;
 *&   - a batch already existing in the target plant is not recreated:
-*&     status S if its valuation type is the one of the file, E if not
-*&     (a batch carries one valuation type);
-*&   - the same Material + Batch twice in the file with two different
-*&     valuation types: every occurrence is rejected.
+*&     status A when nothing is to do (same valuation type, or material
+*&     not split-valuated), E when its valuation type differs from the
+*&     file (a batch carries one valuation type).
+*& File lines that cannot be used are listed as errors too: material
+*& number not convertible, material or batch missing, batch not found
+*& among the source batches selected (does not exist, flagged for
+*& deletion, or outside S_CHARG).
 *&
 *& Run modes (v0.2):
 *&   - Online (P_ONL, default): the file is read and checked, then the
@@ -73,7 +81,8 @@
 *& Assumptions
 *&---------------------------------------------------------------------*
 *& - Line 1 is the header and is skipped. Fields after the third are
-*&   ignored.
+*&   ignored. The file may hold no item line: then only the batches of
+*&   materials not split-valuated in the target plant can be copied.
 *& - When the file is prepared in Excel, the material and batch columns
 *&   are formatted as text before saving as CSV (leading zeros kept).
 *& - Valuation level = plant (MBEW-BWKEY = target plant).
@@ -100,26 +109,44 @@ CONSTANTS:
   gc_xchpf   TYPE xchpf VALUE 'X',
   gc_sep     TYPE c VALUE ';'.         " field separator of the CSV file [v0.3]
 
-TYPES: BEGIN OF gty_item,
+* file line                                                     [v1.0]
+TYPES: BEGIN OF gty_file,
          line  TYPE i,
+         matnr TYPE matnr,
+         charg TYPE charg_d,             " as in the file (upper case)
+         bwtar TYPE bwtar_d,
+         bad   TYPE abap_bool,
+         msg   TYPE bapi_msg,
+         id    TYPE i,                   " source batch it was matched to
+       END OF gty_file,
+       gtt_file TYPE STANDARD TABLE OF gty_file WITH DEFAULT KEY.
+
+* one item per source batch, plus one per unusable file line   [v1.0]
+TYPES: BEGIN OF gty_item,
+         id    TYPE i,                   " item number               [v1.0]
+         line  TYPE i,                   " file line, 0 = not in the file
          matnr TYPE matnr,
          charg TYPE charg_d,
          bwtar TYPE bwtar_d,
+         split TYPE abap_bool,           " split-valuated in the target plant [v1.0]
+         multi TYPE abap_bool,           " several valuation types in the file [v1.0]
          bad   TYPE abap_bool,
          msg   TYPE bapi_msg,
          note  TYPE bapi_msg,            " information, e.g. batch completed [v0.4]
          pstat TYPE c LENGTH 1,          " status before posting: R / A / E [v0.8]
          pmsg  TYPE bapi_msg,            " its message [v0.8]
        END OF gty_item,
-       gtt_item TYPE STANDARD TABLE OF gty_item WITH DEFAULT KEY.
+       gtt_item TYPE SORTED TABLE OF gty_item WITH UNIQUE KEY id.
 
 TYPES: BEGIN OF gty_out,
          sel     TYPE c LENGTH 1,        " row ticked for posting (online) [v0.8]
          status  TYPE c LENGTH 1,
+         id      TYPE i,                 " item number, hidden [v1.0]
          line    TYPE i,
          matnr   TYPE matnr,
          charg   TYPE charg_d,
          bwtar   TYPE bwtar_d,
+         split   TYPE abap_bool,         " split-valuated in the target plant [v1.0]
          message TYPE bapi_msg,
          rowcolor TYPE c LENGTH 4,       " ALV row colour [v0.2]
          stattx   TYPE c LENGTH 20,      " status in words, ALV grouping [v0.5]
@@ -134,14 +161,32 @@ TYPES: BEGIN OF gty_marc,
        END OF gty_marc,
        gtt_marc TYPE SORTED TABLE OF gty_marc WITH UNIQUE KEY matnr werks.
 
-DATA: gt_item TYPE gtt_item,
-      gt_out  TYPE gtt_out,
-      gt_marc TYPE gtt_marc,
+TYPES: BEGIN OF gty_tbat,
+         matnr TYPE matnr,
+         charg TYPE charg_d,
+         bwtar TYPE bwtar_d,
+       END OF gty_tbat,
+       gtt_tbat TYPE SORTED TABLE OF gty_tbat WITH UNIQUE KEY matnr charg.
+TYPES: BEGIN OF gty_vt,
+         matnr TYPE matnr,
+         bwtar TYPE bwtar_d,
+       END OF gty_vt,
+       gtt_vt TYPE SORTED TABLE OF gty_vt WITH UNIQUE KEY matnr bwtar.
+
+DATA: gt_file  TYPE gtt_file,                                   " [v1.0]
+      gt_item  TYPE gtt_item,
+      gt_out   TYPE gtt_out,
+      gt_marc  TYPE gtt_marc,
+      gt_split TYPE SORTED TABLE OF matnr WITH UNIQUE KEY table_line, " split-valuated in target [v1.0]
+      gt_vt    TYPE gtt_vt,         " valuation types of the target plant [v1.0]
+      gt_tbat  TYPE gtt_tbat,       " batches already in the target plant [v1.0]
       gv_sim  TYPE abap_bool,          " simulation: background mode with P_TEST [v0.2]
       gv_job  TYPE abap_bool.          " the run was handed over to a background job [v0.7]
 
-* reference field of the status selection                     [v0.8]
-DATA: gv_sel_stat TYPE c LENGTH 1.
+* reference fields of the select-options                [v0.8, v1.0]
+DATA: gv_sel_stat  TYPE c LENGTH 1,
+      gv_sel_matnr TYPE mara-matnr,
+      gv_sel_charg TYPE mcha-charg.
 
 *&---------------------------------------------------------------------*
 *&  Selection screen
@@ -151,6 +196,9 @@ SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-b01.
 * first radio-button click; checked on execution in F_CHECK_SCREEN [v0.2]
   PARAMETERS: p_wsrc TYPE werks_d DEFAULT '8P01',                  " source plant
               p_wdst TYPE werks_d DEFAULT '8Q01'.                  " target plant
+* batches of the source plant to extend (blank = all)          [v1.0]
+  SELECT-OPTIONS: s_matnr FOR gv_sel_matnr,
+                  s_charg FOR gv_sel_charg.
 SELECTION-SCREEN END OF BLOCK b1.
 
 SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE TEXT-b02.
@@ -204,8 +252,11 @@ START-OF-SELECTION.
   ENDIF.
 
   PERFORM f_read_file.
-  PERFORM f_read_marc.
+* source batches drive the run; the file gives the valuation types [v1.0]
+  PERFORM f_read_batches.
+  PERFORM f_match_file.
   PERFORM f_check_items.
+  PERFORM f_file_leftovers.
 * status before posting, then the status selection          [v0.8]
   PERFORM f_pre_status.
   DELETE gt_item WHERE pstat NOT IN s_stat.
@@ -254,6 +305,8 @@ FORM f_submit_job.
   SUBMIT zptp_split_val_batch_copy
     WITH p_wsrc = p_wsrc
     WITH p_wdst = p_wdst
+    WITH s_matnr IN s_matnr                                     " [v1.0]
+    WITH s_charg IN s_charg
     WITH p_loc  = space
     WITH p_srv  = abap_true
     WITH p_file = p_file
@@ -485,7 +538,7 @@ FORM f_read_file.
         lt_lines TYPE string_table,
         lv_line  TYPE string,
         lt_field TYPE string_table,
-        ls_item  TYPE gty_item,
+        ls_file  TYPE gty_file,
         lv_matnr TYPE string,
         lv_charg TYPE string,
         lv_bwtar TYPE string,
@@ -555,7 +608,7 @@ FORM f_read_file.
     IF lv_row = 1.
       CONTINUE.
     ENDIF.
-    CLEAR: ls_item, lv_matnr, lv_charg, lv_bwtar, lt_field.
+    CLEAR: ls_file, lv_matnr, lv_charg, lv_bwtar, lt_field.
     SPLIT lv_line AT gc_sep INTO TABLE lt_field.
     READ TABLE lt_field INDEX 1 INTO lv_matnr.
     READ TABLE lt_field INDEX 2 INTO lv_charg.
@@ -565,44 +618,70 @@ FORM f_read_file.
       CONTINUE.                           " empty row
     ENDIF.
 
-    ls_item-line  = lv_row.
-    ls_item-charg = to_upper( lv_charg ).
-    ls_item-bwtar = to_upper( lv_bwtar ).
+    ls_file-line  = lv_row.
+    ls_file-charg = to_upper( lv_charg ).
+    ls_file-bwtar = to_upper( lv_bwtar ).
     IF lv_matnr IS NOT INITIAL.
       CALL FUNCTION 'CONVERSION_EXIT_MATN1_INPUT'
         EXPORTING  input        = lv_matnr
-        IMPORTING  output       = ls_item-matnr
+        IMPORTING  output       = ls_file-matnr
         EXCEPTIONS length_error = 1
                    OTHERS       = 2.
       IF sy-subrc <> 0.
-        ls_item-bad = abap_true.
-        ls_item-msg = |Line { lv_row }: material number '{ lv_matnr }' cannot be converted|.
+        ls_file-bad = abap_true.
+        ls_file-msg = |Line { lv_row }: material number '{ lv_matnr }' cannot be converted|.
       ENDIF.
     ENDIF.
-    APPEND ls_item TO gt_item.
+    IF ls_file-bad = abap_false AND ( ls_file-matnr IS INITIAL OR ls_file-charg IS INITIAL ).
+      ls_file-bad = abap_true.
+      ls_file-msg = |Line { lv_row }: material and batch are mandatory|.
+    ENDIF.
+    APPEND ls_file TO gt_file.
   ENDLOOP.
-
-  IF gt_item IS INITIAL.
-    MESSAGE 'No item found in the file (line 1 is the header)' TYPE 'E'.
-  ENDIF.
+* a file without item line is accepted: only the batches of materials
+* not split-valuated in the target plant can then be copied    [v1.0]
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-FORM f_read_marc.
-  DATA lt_mat TYPE SORTED TABLE OF matnr WITH UNIQUE KEY table_line.
-  LOOP AT gt_item INTO DATA(ls_item) WHERE matnr IS NOT INITIAL.
-    INSERT ls_item-matnr INTO TABLE lt_mat.
-  ENDLOOP.
-  IF lt_mat IS INITIAL.
+*&      Form  F_READ_BATCHES                                    [v1.0]
+*&      Batches of the source plant to extend (MCHA, not flagged for
+*&      deletion, within S_MATNR / S_CHARG): one item each. Reads at the
+*&      same time, for their materials, the batch management of both
+*&      plants, the split valuation and the valuation types of the
+*&      target plant, and the batches already in the target plant.
+*&---------------------------------------------------------------------*
+FORM f_read_batches.
+  DATA: lt_mat TYPE SORTED TABLE OF matnr WITH UNIQUE KEY table_line,
+        lv_id  TYPE i.
+
+  CLEAR: gt_item, gt_marc, gt_split, gt_vt, gt_tbat.
+
+  SELECT matnr, charg FROM mcha
+    WHERE werks =  @p_wsrc
+      AND matnr IN @s_matnr
+      AND charg IN @s_charg
+      AND lvorm =  @space
+    ORDER BY matnr, charg
+    INTO TABLE @DATA(lt_src).
+  IF lt_src IS INITIAL.
     RETURN.
   ENDIF.
+
+  LOOP AT lt_src INTO DATA(ls_src).
+    lv_id = lv_id + 1.
+    INSERT VALUE gty_item( id = lv_id matnr = ls_src-matnr charg = ls_src-charg )
+           INTO TABLE gt_item.
+    INSERT ls_src-matnr INTO TABLE lt_mat.
+  ENDLOOP.
+
+* batch management in both plants
   SELECT c~matnr, c~werks, c~xchpf, a~xchpf AS xchpf_cl
-    INTO TABLE @DATA(lt_marc)
     FROM marc AS c
     INNER JOIN mara AS a ON a~matnr = c~matnr
     FOR ALL ENTRIES IN @lt_mat
     WHERE c~matnr = @lt_mat-table_line
-      AND ( c~werks = @p_wsrc OR c~werks = @p_wdst ).
+      AND ( c~werks = @p_wsrc OR c~werks = @p_wdst )
+    INTO TABLE @DATA(lt_marc).
   LOOP AT lt_marc INTO DATA(ls_m).
     INSERT VALUE gty_marc( matnr    = ls_m-matnr
                            werks    = ls_m-werks
@@ -610,151 +689,196 @@ FORM f_read_marc.
                                             OR ls_m-xchpf_cl = gc_xchpf ) )
            INTO TABLE gt_marc.
   ENDLOOP.
+
+* split-valuated in the target plant: the header row (BWTAR blank)
+* carries a valuation category, as tested by ZPTP_SPLIT_VAL_MIG
+  SELECT matnr FROM mbew
+    FOR ALL ENTRIES IN @lt_mat
+    WHERE matnr =  @lt_mat-table_line
+      AND bwkey =  @p_wdst
+      AND bwtar =  @space
+      AND bwtty <> @space
+    INTO TABLE @gt_split.
+
+* valuation types of the target plant
+  SELECT matnr, bwtar FROM mbew
+    FOR ALL ENTRIES IN @lt_mat
+    WHERE matnr =  @lt_mat-table_line
+      AND bwkey =  @p_wdst
+      AND bwtar <> @space
+    INTO CORRESPONDING FIELDS OF TABLE @gt_vt.
+
+* batches already in the target plant, with their valuation type
+  SELECT matnr, charg, bwtar FROM mcha
+    FOR ALL ENTRIES IN @lt_mat
+    WHERE matnr = @lt_mat-table_line
+      AND werks = @p_wdst
+    INTO CORRESPONDING FIELDS OF TABLE @gt_tbat.
+
+  LOOP AT gt_item ASSIGNING FIELD-SYMBOL(<ls_item>).
+    READ TABLE gt_split TRANSPORTING NO FIELDS WITH TABLE KEY table_line = <ls_item>-matnr.
+    <ls_item>-split = xsdbool( sy-subrc = 0 ).
+  ENDLOOP.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*&      Form  F_CHECK_ITEMS   (file-level checks, before any creation)
+*&      Form  F_MATCH_FILE                                      [v1.0]
+*&      Each usable file line is attached to one source batch, on
+*&      Material + Batch: first with the batch normalised with leading
+*&      zeros, then, for the lines still unmatched, without leading
+*&      zeros (v0.9 rule). The item takes the file line and its
+*&      valuation type; two file lines with different valuation types
+*&      for the same batch flag the item (MULTI).
 *&---------------------------------------------------------------------*
-FORM f_check_items.
-
-  TYPES: BEGIN OF lty_key,
+FORM f_match_file.
+  TYPES: BEGIN OF lty_idx,
            matnr TYPE matnr,
            charg TYPE charg_d,
-           bwtar TYPE bwtar_d,
-         END OF lty_key.
-  DATA: lt_seen  TYPE SORTED TABLE OF lty_key WITH UNIQUE KEY matnr charg bwtar,
-        lt_multi TYPE SORTED TABLE OF lty_key WITH UNIQUE KEY matnr charg bwtar,
-        ls_src   TYPE gty_marc,
-        ls_dst   TYPE gty_marc,
-        ls_prev  TYPE lty_key.
+           id    TYPE i,
+         END OF lty_idx.
+  DATA: lt_idx  TYPE SORTED TABLE OF lty_idx WITH UNIQUE KEY matnr charg,
+        lv_try  TYPE charg_d,
+        ls_idx  TYPE lty_idx.
 
-* --- source batch exists in the source plant (MCHA)              [v0.4]
-* runs first: a batch completed with leading zeros changes the key used
-* by the next checks
-  PERFORM f_check_source_batch.
-
-* --- several valuation types for one batch ----------------------------
-  LOOP AT gt_item INTO DATA(ls_i) WHERE bad = abap_false
-                                    AND matnr IS NOT INITIAL AND charg IS NOT INITIAL.
-    INSERT VALUE lty_key( matnr = ls_i-matnr charg = ls_i-charg bwtar = ls_i-bwtar )
-           INTO TABLE lt_seen.
-  ENDLOOP.
-  LOOP AT lt_seen INTO DATA(ls_s).
-    IF ls_s-matnr = ls_prev-matnr AND ls_s-charg = ls_prev-charg.
-      INSERT VALUE lty_key( matnr = ls_s-matnr charg = ls_s-charg ) INTO TABLE lt_multi.
-    ENDIF.
-    ls_prev = ls_s.
+  LOOP AT gt_item INTO DATA(ls_item).
+    INSERT VALUE lty_idx( matnr = ls_item-matnr charg = ls_item-charg id = ls_item-id )
+           INTO TABLE lt_idx.
   ENDLOOP.
 
-* --- valuation types of the target plant (read once) -------------------
-  SELECT matnr, bwtar FROM mbew INTO TABLE @DATA(lt_mbew)
-    WHERE bwkey = @p_wdst AND bwtar <> @space.
-  SORT lt_mbew BY matnr bwtar.
+* pass 1: normalised batch; pass 2: batch without leading zeros
+  DO 2 TIMES.
+    DATA(lv_pass) = sy-index.
+    LOOP AT gt_file ASSIGNING FIELD-SYMBOL(<ls_file>) WHERE bad = abap_false AND id = 0.
+      IF lv_pass = 1.
+        PERFORM f_norm_batch USING <ls_file>-charg CHANGING lv_try.
+      ELSE.
+        PERFORM f_strip_batch USING <ls_file>-charg CHANGING lv_try.
+      ENDIF.
+      READ TABLE lt_idx INTO ls_idx WITH TABLE KEY matnr = <ls_file>-matnr charg = lv_try.
+      CHECK sy-subrc = 0.
+      <ls_file>-id = ls_idx-id.
+
+      READ TABLE gt_item ASSIGNING FIELD-SYMBOL(<ls_item>) WITH TABLE KEY id = ls_idx-id.
+      IF <ls_item>-line = 0.
+        <ls_item>-line  = <ls_file>-line.
+        <ls_item>-bwtar = <ls_file>-bwtar.
+        IF <ls_file>-charg <> <ls_item>-charg.
+          <ls_item>-note = |batch { <ls_file>-charg } of the file matched as { <ls_item>-charg }|.
+        ENDIF.
+      ELSEIF <ls_file>-bwtar <> <ls_item>-bwtar.
+        <ls_item>-multi = abap_true.
+      ENDIF.
+    ENDLOOP.
+  ENDDO.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_CHECK_ITEMS   (checks per source batch, before creation)
+*&      v1.0: split-valuated material -> the valuation type comes from
+*&      the file, mandatory; not split-valuated -> copied without one.
+*&---------------------------------------------------------------------*
+FORM f_check_items.
+  DATA: ls_src TYPE gty_marc,
+        ls_dst TYPE gty_marc.
 
   LOOP AT gt_item ASSIGNING FIELD-SYMBOL(<ls_item>) WHERE bad = abap_false.
-
-    IF <ls_item>-matnr IS INITIAL OR <ls_item>-charg IS INITIAL OR <ls_item>-bwtar IS INITIAL.
-      <ls_item>-bad = abap_true.
-      <ls_item>-msg = |Line { <ls_item>-line }: material, batch and valuation type are all mandatory|.
-      CONTINUE.
-    ENDIF.
 
     READ TABLE gt_marc INTO ls_src
          WITH TABLE KEY matnr = <ls_item>-matnr werks = p_wsrc.
     IF sy-subrc <> 0.
       <ls_item>-bad = abap_true.
-      <ls_item>-msg = |Material { <ls_item>-matnr } is not extended to plant { p_wsrc }|.
+      <ls_item>-msg = |Material { <ls_item>-matnr ALPHA = OUT } is not extended to plant { p_wsrc }|.
       CONTINUE.
     ENDIF.
     READ TABLE gt_marc INTO ls_dst
          WITH TABLE KEY matnr = <ls_item>-matnr werks = p_wdst.
     IF sy-subrc <> 0.
       <ls_item>-bad = abap_true.
-      <ls_item>-msg = |Material { <ls_item>-matnr } is not extended to plant { p_wdst }|.
+      <ls_item>-msg = |Material { <ls_item>-matnr ALPHA = OUT } is not extended to plant { p_wdst } | &&
+                      |- batch not copied|.
       CONTINUE.
     ENDIF.
     IF ls_src-batchmgd = abap_false OR ls_dst-batchmgd = abap_false.
       <ls_item>-bad = abap_true.
-      <ls_item>-msg = |Material { <ls_item>-matnr } is not batch-managed in both plants|.
+      <ls_item>-msg = |Material { <ls_item>-matnr ALPHA = OUT } is not batch-managed in both plants|.
       CONTINUE.
     ENDIF.
 
-    READ TABLE lt_mbew TRANSPORTING NO FIELDS
-         WITH KEY matnr = <ls_item>-matnr bwtar = <ls_item>-bwtar BINARY SEARCH.
+    IF <ls_item>-split = abap_false.
+*     not split-valuated: copied without valuation type
+      IF <ls_item>-bwtar IS NOT INITIAL.
+        <ls_item>-note = |{ COND string( WHEN <ls_item>-note IS NOT INITIAL
+                                         THEN |{ <ls_item>-note }, | ) }| &&
+                         |valuation type { <ls_item>-bwtar } of the file ignored, | &&
+                         |material not split-valuated in plant { p_wdst }|.
+        CLEAR <ls_item>-bwtar.
+      ENDIF.
+      CONTINUE.
+    ENDIF.
+
+*   split-valuated: the file must give the valuation type
+    IF <ls_item>-line = 0.
+      <ls_item>-bad = abap_true.
+      <ls_item>-msg = |Material split-valuated in plant { p_wdst } and batch not in the file | &&
+                      |- no valuation type, batch not copied|.
+      CONTINUE.
+    ENDIF.
+    IF <ls_item>-multi = abap_true.
+      <ls_item>-bad = abap_true.
+      <ls_item>-msg = |Batch given with several valuation types in the file - batch not copied|.
+      CONTINUE.
+    ENDIF.
+    IF <ls_item>-bwtar IS INITIAL.
+      <ls_item>-bad = abap_true.
+      <ls_item>-msg = |Material split-valuated in plant { p_wdst }: file line { <ls_item>-line } | &&
+                      |has no valuation type - batch not copied|.
+      CONTINUE.
+    ENDIF.
+    READ TABLE gt_vt TRANSPORTING NO FIELDS
+         WITH TABLE KEY matnr = <ls_item>-matnr bwtar = <ls_item>-bwtar.
     IF sy-subrc <> 0.
       <ls_item>-bad = abap_true.
       <ls_item>-msg = |Valuation type { <ls_item>-bwtar } does not exist for material | &&
-                      |{ <ls_item>-matnr } in plant { p_wdst }|.
+                      |{ <ls_item>-matnr ALPHA = OUT } in plant { p_wdst }|.
       CONTINUE.
     ENDIF.
-
-    LOOP AT lt_multi TRANSPORTING NO FIELDS
-         WHERE matnr = <ls_item>-matnr AND charg = <ls_item>-charg.
-      <ls_item>-bad = abap_true.
-      <ls_item>-msg = |Batch { <ls_item>-charg } of material { <ls_item>-matnr } is given | &&
-                      |with several valuation types in the file - rejected|.
-      EXIT.
-    ENDLOOP.
   ENDLOOP.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*&      Form  F_CHECK_SOURCE_BATCH                        [v0.4, v0.9]
-*&      The batch of the file must exist in the source plant, otherwise
-*&      BAPI_BATCH_GET_DETAIL fails at creation. A numeric batch is
-*&      normalised with leading zeros (10 characters) and matched first
-*&      in that form; when it does not exist, the batch without leading
-*&      zeros is tried. Neither found: the line is rejected and carries
-*&      the normalised batch.
+*&      Form  F_FILE_LEFTOVERS                                  [v1.0]
+*&      File lines that were not used are listed as error items: format
+*&      errors, and Material + Batch not found among the source batches
+*&      of the selection. Lines outside S_MATNR are left out silently.
 *&---------------------------------------------------------------------*
-FORM f_check_source_batch.
-  DATA: lv_norm  TYPE charg_d,
+FORM f_file_leftovers.
+  DATA: lv_id    TYPE i,
+        lv_norm  TYPE charg_d,
         lv_strip TYPE charg_d,
-        lv_file  TYPE charg_d,
-        lv_x     TYPE charg_d.
+        ls_item  TYPE gty_item.
 
-  LOOP AT gt_item ASSIGNING FIELD-SYMBOL(<ls_item>)
-       WHERE bad = abap_false AND matnr IS NOT INITIAL AND charg IS NOT INITIAL.
-
-    lv_file = <ls_item>-charg.
-    PERFORM f_norm_batch  USING lv_file CHANGING lv_norm.
-    PERFORM f_strip_batch USING lv_file CHANGING lv_strip.
-
-*   1. normalised batch (leading zeros)
-    SELECT SINGLE charg FROM mcha INTO @lv_x
-      WHERE matnr = @<ls_item>-matnr
-        AND werks = @p_wsrc
-        AND charg = @lv_norm.
-    IF sy-subrc = 0.
-      <ls_item>-charg = lv_norm.
-      IF lv_norm <> lv_file.
-        <ls_item>-note = |batch { lv_file } of the file normalised to { lv_norm }|.
-      ENDIF.
-      CONTINUE.
+  lv_id = lines( gt_item ).
+  LOOP AT gt_file INTO DATA(ls_file) WHERE id = 0.
+    CLEAR ls_item.
+    IF ls_file-bad = abap_false.
+      CHECK ls_file-matnr IN s_matnr.
+      PERFORM f_norm_batch  USING ls_file-charg CHANGING lv_norm.
+      PERFORM f_strip_batch USING ls_file-charg CHANGING lv_strip.
+      CHECK lv_norm IN s_charg OR lv_strip IN s_charg.
+      ls_item-msg = |Batch { lv_norm } of material { ls_file-matnr ALPHA = OUT } not found in plant | &&
+                    |{ p_wsrc }{ COND string( WHEN lv_strip <> lv_norm THEN | (nor { lv_strip })| ) } | &&
+                    |or flagged for deletion - check the batch number in the file|.
+    ELSE.
+      ls_item-msg = ls_file-msg.
     ENDIF.
-
-*   2. batch without leading zeros
-    IF lv_strip <> lv_norm.
-      SELECT SINGLE charg FROM mcha INTO @lv_x
-        WHERE matnr = @<ls_item>-matnr
-          AND werks = @p_wsrc
-          AND charg = @lv_strip.
-      IF sy-subrc = 0.
-        <ls_item>-charg = lv_strip.
-        IF lv_strip <> lv_file.
-          <ls_item>-note = |batch { lv_file } of the file matched as { lv_strip } (without leading zeros)|.
-        ENDIF.
-        CONTINUE.
-      ENDIF.
-    ENDIF.
-
-    <ls_item>-charg = lv_norm.
-    <ls_item>-bad   = abap_true.
-    <ls_item>-msg   = |Batch { lv_norm } of material { <ls_item>-matnr ALPHA = OUT } | &&
-                      |does not exist in plant { p_wsrc }| &&
-                      |{ COND string( WHEN lv_strip <> lv_norm
-                                      THEN | (nor { lv_strip })| ) }| &&
-                      | - check the batch number in the file|.
+    lv_id = lv_id + 1.
+    ls_item-id    = lv_id.
+    ls_item-line  = ls_file-line.
+    ls_item-matnr = ls_file-matnr.
+    ls_item-charg = ls_file-charg.
+    ls_item-bwtar = ls_file-bwtar.
+    ls_item-bad   = abap_true.
+    INSERT ls_item INTO TABLE gt_item.
   ENDLOOP.
 ENDFORM.
 
@@ -795,37 +919,45 @@ FORM f_strip_batch USING    iv_charg TYPE charg_d
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*&      Form  F_PRE_STATUS                                      [v0.8]
+*&      Form  F_PRE_STATUS                                [v0.8, v1.0]
 *&      Status of each item before posting, used by the status selection:
-*&        E  rejected by the file checks, or batch already in the target
-*&           plant with another (or no) valuation type;
-*&        A  batch already in the target plant with the valuation type of
-*&           the file: nothing to post;
+*&        E  rejected by the checks, or batch already in the target plant
+*&           with another (or no) valuation type than the file;
+*&        A  batch already in the target plant, nothing to do (same
+*&           valuation type, or material not split-valuated);
 *&        R  ready to be posted.
 *&---------------------------------------------------------------------*
 FORM f_pre_status.
+  DATA ls_tbat TYPE gty_tbat.
+
   LOOP AT gt_item ASSIGNING FIELD-SYMBOL(<ls_item>).
     IF <ls_item>-bad = abap_true.
       <ls_item>-pstat = gc_st_err.
       <ls_item>-pmsg  = <ls_item>-msg.
       CONTINUE.
     ENDIF.
-    SELECT SINGLE bwtar FROM mcha INTO @DATA(lv_tbwtar)
-      WHERE matnr = @<ls_item>-matnr AND werks = @p_wdst AND charg = @<ls_item>-charg.
+    READ TABLE gt_tbat INTO ls_tbat
+         WITH TABLE KEY matnr = <ls_item>-matnr charg = <ls_item>-charg.
     IF sy-subrc <> 0.
       <ls_item>-pstat = gc_st_open.
-      <ls_item>-pmsg  = |Ready - tick the row and press Post to create the batch in plant { p_wdst }|.
-    ELSEIF lv_tbwtar = <ls_item>-bwtar.
+      <ls_item>-pmsg  = |Ready - batch to be created in plant { p_wdst } | &&
+                        |{ COND string( WHEN <ls_item>-split = abap_true
+                                        THEN |with valuation type { <ls_item>-bwtar }|
+                                        ELSE `without valuation type` ) }|.
+    ELSEIF <ls_item>-split = abap_false.
       <ls_item>-pstat = gc_st_exist.
-      <ls_item>-pmsg  = |Batch already exists in plant { p_wdst } with valuation type { lv_tbwtar }|.
+      <ls_item>-pmsg  = |Batch already exists in plant { p_wdst }|.
+    ELSEIF ls_tbat-bwtar = <ls_item>-bwtar.
+      <ls_item>-pstat = gc_st_exist.
+      <ls_item>-pmsg  = |Batch already exists in plant { p_wdst } with valuation type { ls_tbat-bwtar }|.
     ELSE.
       <ls_item>-bad   = abap_true.
       <ls_item>-pstat = gc_st_err.
-      <ls_item>-pmsg  = COND #( WHEN lv_tbwtar IS INITIAL
+      <ls_item>-pmsg  = COND #( WHEN ls_tbat-bwtar IS INITIAL
                                 THEN |Batch exists in plant { p_wdst } without valuation type, | &&
                                      |file gives { <ls_item>-bwtar } - not changed|
                                 ELSE |Batch exists in plant { p_wdst } with valuation type | &&
-                                     |{ lv_tbwtar }, file gives { <ls_item>-bwtar }| ).
+                                     |{ ls_tbat-bwtar }, file gives { <ls_item>-bwtar }| ).
       <ls_item>-msg   = <ls_item>-pmsg.
     ENDIF.
   ENDLOOP.
@@ -843,7 +975,7 @@ FORM f_f4_status.
 
   lt_val = VALUE #( ( domvalue_l = gc_st_open  ddtext = 'Ready to be posted' )
                     ( domvalue_l = gc_st_exist ddtext = 'Already in the target plant' )
-                    ( domvalue_l = gc_st_err   ddtext = 'Error (file checks, valuation type)' ) ).
+                    ( domvalue_l = gc_st_err   ddtext = 'Error (checks, valuation type)' ) ).
 
   CALL FUNCTION 'F4IF_INT_TABLE_VALUE_REQUEST'
     EXPORTING  retfield        = 'DOMVALUE_L'
@@ -866,52 +998,38 @@ ENDFORM.
 *&      Form  F_PROCESS_ITEMS
 *&---------------------------------------------------------------------*
 FORM f_process_items.
-
-  TYPES: BEGIN OF lty_done,
-           matnr TYPE matnr,
-           charg TYPE charg_d,
-         END OF lty_done.
-  DATA: ls_out  TYPE gty_out,
-        lt_done TYPE SORTED TABLE OF lty_done WITH UNIQUE KEY matnr charg.
+  DATA ls_out TYPE gty_out.
 
   LOOP AT gt_item INTO DATA(ls_item).
     CLEAR ls_out.
-    ls_out-line  = ls_item-line.
-    ls_out-matnr = ls_item-matnr.
-    ls_out-charg = ls_item-charg.
-    ls_out-bwtar = ls_item-bwtar.
+    PERFORM f_item_to_out USING ls_item CHANGING ls_out.
 
     IF ls_item-pstat <> gc_st_open.                             " [v0.8]
-*     E (file checks) or A (already in the target plant): nothing to post
+*     E (checks) or A (already in the target plant): nothing to post
       ls_out-status  = ls_item-pstat.
       ls_out-message = ls_item-pmsg.
-      APPEND ls_out TO gt_out.
-      CONTINUE.
+    ELSE.
+      PERFORM f_copy_batch USING ls_item CHANGING ls_out.
     ENDIF.
-
-*   same Material + Batch (+ valuation type) twice: handled once
-    READ TABLE lt_done TRANSPORTING NO FIELDS
-         WITH TABLE KEY matnr = ls_item-matnr charg = ls_item-charg.
-    IF sy-subrc = 0.
-      ls_out-status  = gc_st_ok.
-      ls_out-message = 'Duplicate line in the file - already handled'.
-      APPEND ls_out TO gt_out.
-      CONTINUE.
-    ENDIF.
-    INSERT VALUE lty_done( matnr = ls_item-matnr charg = ls_item-charg )
-           INTO TABLE lt_done.
-
-    PERFORM f_copy_batch USING ls_item CHANGING ls_out.
-    IF ls_item-note IS NOT INITIAL.
+    IF ls_item-note IS NOT INITIAL AND ls_out-status <> gc_st_err.
       ls_out-message = |{ ls_out-message } ({ ls_item-note })|.
     ENDIF.
     PERFORM f_set_color CHANGING ls_out.
     APPEND ls_out TO gt_out.
   ENDLOOP.
+ENDFORM.
 
-  LOOP AT gt_out ASSIGNING FIELD-SYMBOL(<ls_col>) WHERE rowcolor IS INITIAL.
-    PERFORM f_set_color CHANGING <ls_col>.
-  ENDLOOP.
+*&---------------------------------------------------------------------*
+*&      Form  F_ITEM_TO_OUT                                     [v1.0]
+*&---------------------------------------------------------------------*
+FORM f_item_to_out USING    is_item TYPE gty_item
+                   CHANGING cs_out  TYPE gty_out.
+  cs_out-id    = is_item-id.
+  cs_out-line  = is_item-line.
+  cs_out-matnr = is_item-matnr.
+  cs_out-charg = is_item-charg.
+  cs_out-bwtar = is_item-bwtar.
+  cs_out-split = is_item-split.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
@@ -924,13 +1042,10 @@ FORM f_prepare_online.
 
   LOOP AT gt_item INTO DATA(ls_item).
     CLEAR ls_out.
-    ls_out-line  = ls_item-line.
-    ls_out-matnr = ls_item-matnr.
-    ls_out-charg = ls_item-charg.
-    ls_out-bwtar = ls_item-bwtar.
+    PERFORM f_item_to_out USING ls_item CHANGING ls_out.        " [v1.0]
     ls_out-status  = ls_item-pstat.                              " [v0.8]
     ls_out-message = ls_item-pmsg.
-    IF ls_item-pstat = gc_st_open AND ls_item-note IS NOT INITIAL.
+    IF ls_item-pstat <> gc_st_err AND ls_item-note IS NOT INITIAL.
       ls_out-message = |{ ls_out-message } ({ ls_item-note })|.
     ENDIF.
     PERFORM f_set_color CHANGING ls_out.
@@ -967,9 +1082,9 @@ FORM f_user_command USING r_ucomm     TYPE sy-ucomm
   CHECK p_onl = abap_true AND r_ucomm = gc_post.
 
 * rows that can be posted: ready, or failed at a previous posting (not
-* rejected by the file checks)
+* rejected by the checks)
   LOOP AT gt_out ASSIGNING FIELD-SYMBOL(<ls_out>) WHERE sel = abap_true.
-    READ TABLE gt_item INTO ls_item WITH KEY line = <ls_out>-line.
+    READ TABLE gt_item INTO ls_item WITH TABLE KEY id = <ls_out>-id.     " [v1.0]
     IF sy-subrc = 0 AND ( <ls_out>-status = gc_st_open
                           OR ( <ls_out>-status = gc_st_err AND ls_item-pstat = gc_st_open ) ).
       lv_todo = lv_todo + 1.
@@ -1000,7 +1115,7 @@ FORM f_user_command USING r_ucomm     TYPE sy-ucomm
   ENDIF.
 
   LOOP AT gt_out ASSIGNING <ls_out> WHERE sel = abap_true.
-    READ TABLE gt_item INTO ls_item WITH KEY line = <ls_out>-line.
+    READ TABLE gt_item INTO ls_item WITH TABLE KEY id = <ls_out>-id.     " [v1.0]
     IF sy-subrc = 0 AND ( <ls_out>-status = gc_st_open
                           OR ( <ls_out>-status = gc_st_err AND ls_item-pstat = gc_st_open ) ).
       PERFORM f_copy_batch USING ls_item CHANGING <ls_out>.
@@ -1056,7 +1171,8 @@ ENDFORM.
 *&---------------------------------------------------------------------*
 *&      Form  F_COPY_BATCH
 *&      Source batch data -> new batch in the target plant, enriched
-*&      with the valuation type of the file.
+*&      with the valuation type of the file when the material is split-
+*&      valuated in the target plant, without one otherwise.    [v1.0]
 *&---------------------------------------------------------------------*
 FORM f_copy_batch USING is_item TYPE gty_item
                   CHANGING cs_out TYPE gty_out.
@@ -1073,7 +1189,10 @@ FORM f_copy_batch USING is_item TYPE gty_item
   SELECT SINGLE bwtar FROM mcha INTO @DATA(lv_tbwtar)
     WHERE matnr = @is_item-matnr AND werks = @p_wdst AND charg = @is_item-charg.
   IF sy-subrc = 0.
-    IF lv_tbwtar IS NOT INITIAL AND lv_tbwtar <> is_item-bwtar.
+    IF is_item-split = abap_false.                              " [v1.0]
+      cs_out-status  = gc_st_exist.
+      cs_out-message = |Batch already exists in plant { p_wdst }|.
+    ELSEIF lv_tbwtar IS NOT INITIAL AND lv_tbwtar <> is_item-bwtar.
       cs_out-status  = gc_st_err.
       cs_out-message = |Batch exists in plant { p_wdst } with valuation type { lv_tbwtar }, | &&
                        |file gives { is_item-bwtar }|.
@@ -1104,13 +1223,15 @@ FORM f_copy_batch USING is_item TYPE gty_item
     RETURN.
   ENDIF.
 
-* --- enrichment with the valuation type of the file -----------------------
-  ls_att-val_type = is_item-bwtar.
+* --- valuation type: the file's one (split-valuated), else none [v1.0]
+  ls_att-val_type = COND #( WHEN is_item-split = abap_true THEN is_item-bwtar ).
+  DATA(lv_vt_txt) = COND string( WHEN is_item-split = abap_true
+                                 THEN |with valuation type { is_item-bwtar }|
+                                 ELSE `without valuation type (not split-valuated)` ).
 
   IF gv_sim = abap_true.
     cs_out-status  = gc_st_test.
-    cs_out-message = |Simulation: batch would be created in plant { p_wdst } | &&
-                     |with valuation type { is_item-bwtar }|.
+    cs_out-message = |Simulation: batch would be created in plant { p_wdst } { lv_vt_txt }|.
     RETURN.
   ENDIF.
 
@@ -1132,7 +1253,7 @@ FORM f_copy_batch USING is_item TYPE gty_item
   ELSE.
     CALL FUNCTION 'BAPI_TRANSACTION_COMMIT' EXPORTING wait = abap_true.
     cs_out-status  = gc_st_ok.
-    cs_out-message = |Batch created in plant { p_wdst } with valuation type { is_item-bwtar }|.
+    cs_out-message = |Batch created in plant { p_wdst } { lv_vt_txt }|.
   ENDIF.
 ENDFORM.
 
@@ -1152,17 +1273,26 @@ FORM f_display_alv.
   add_col 'STATTX'  'Status'.
   add_col 'STATUS'  'St'.
   add_col 'LINE'    'File line'.
+  ls_fcat-no_zero = abap_true.                                 " 0 = not in the file [v1.0]
+  MODIFY lt_fcat FROM ls_fcat INDEX lines( lt_fcat ).
   add_col 'MATNR'   'Material'.
   add_col 'CHARG'   'Batch'.
   add_col 'BWTAR'   'Val.Type'.
+  add_col 'SPLIT'   'Split val.'.                              " [v1.0]
+  ls_fcat-checkbox = abap_true.
+  MODIFY lt_fcat FROM ls_fcat INDEX lines( lt_fcat ).
   add_col 'MESSAGE' 'Message'.
 * technical sort key, not displayed                            [v0.5]
   add_col 'SORT_KEY' 'Sort'.
   ls_fcat-no_out = abap_true.
   MODIFY lt_fcat FROM ls_fcat INDEX lines( lt_fcat ).
+  add_col 'ID' 'Item'.                                         " [v1.0]
+  ls_fcat-no_out = abap_true.
+  MODIFY lt_fcat FROM ls_fcat INDEX lines( lt_fcat ).
   lt_sort = VALUE #( ( spos = 1 fieldname = 'SORT_KEY' up = abap_true )
                      ( spos = 2 fieldname = 'STATTX'   up = abap_true group = 'UL' )
-                     ( spos = 3 fieldname = 'LINE'     up = abap_true ) ).
+                     ( spos = 3 fieldname = 'MATNR'    up = abap_true )
+                     ( spos = 4 fieldname = 'CHARG'    up = abap_true ) ).
 
   IF gv_sim = abap_true.
     MESSAGE 'SIMULATION - no batch created' TYPE 'S'.
@@ -1174,7 +1304,7 @@ FORM f_display_alv.
     ls_lay-box_fieldname = 'SEL'.
   ENDIF.
   DATA(lv_title) = CONV lvc_title( COND #( WHEN p_onl = abap_true
-                     THEN |Tick the batches and press Post to create them in plant { p_wdst }|
+                     THEN |Batches of plant { p_wsrc } - tick them and press Post to create them in plant { p_wdst }|
                      WHEN gv_sim = abap_true
                      THEN |Simulation - batches { p_wsrc } -> { p_wdst }|
                      ELSE |Batches created { p_wsrc } -> { p_wdst }| ) ).

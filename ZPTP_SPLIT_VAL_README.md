@@ -46,6 +46,26 @@ This repository holds the code only; version history is kept in git (the former
 - Messages 054 and 055 to create in SE91. Anything counting `ZPTP_MOV_EXEC` rows per file line must
   filter on `BWART = '301'`.
 
+## ZPTP_SPLIT_VAL_BATCH_COPY v1.0 (all batches of the source plant)
+The run is driven by the batches of the source plant, no longer by the file:
+- `F_READ_BATCHES`: every batch of `P_WSRC` in MCHA (not flagged for deletion, within the new
+  select-options `S_MATNR` / `S_CHARG`, blank = all) is one item. Batch management of both plants,
+  split valuation in `P_WDST` (MBEW header row with `BWTTY`, same test as the migration), valuation
+  types and the batches already in `P_WDST` are read once for those materials.
+- `F_MATCH_FILE`: each file line is attached to its source batch (normalised batch first, then
+  without leading zeros).
+- `F_CHECK_ITEMS`: material extended to `P_WDST` and batch-managed in both plants. **Split-valuated**
+  in `P_WDST`: the valuation type of the file line is used; no file line, no valuation type, several
+  valuation types, or a type without MBEW segment → E, the batch is not copied. **Not split-valuated**:
+  the batch is copied without valuation type (a type given by the file is ignored, noted in the message).
+- `F_FILE_LEFTOVERS`: file lines not used (format error, batch not found among the source batches or
+  flagged for deletion) are listed as E rows; lines outside `S_MATNR` / `S_CHARG` are left out.
+- Existing batch in `P_WDST`: A when nothing is to do (same valuation type, or not split-valuated), E when
+  its valuation type differs from the file.
+- ALV: one row per source batch, new column *Split val.*, *File line* blank when the batch is not in the
+  file; sorted by status, material, batch. Rows are identified by a hidden item number (`ID`).
+- A file with the header only is accepted. New selection texts: `S_MATNR` *Material*, `S_CHARG` *Batch*.
+
 ## What changed in v1.10 (batch number with leading zeros)
 - `F_RESOLVE_BATCH`, called after `F_NORMALISE_BATCH` and before the aggregation: a numeric batch of the
   file is normalised with leading zeros to 10 characters (`LCL_HELP=>NORM_BATCH`, `123` → `0000000123`)
@@ -53,7 +73,7 @@ This repository holds the code only; version history is kept in git (the former
   does not exist, the batch without leading zeros (`LCL_HELP=>STRIP_BATCH`, `123`) is tried. The batch
   found replaces the file value for every later step. Neither found: the normalised batch is kept and the
   line ends in 006 as before. Non-numeric batches are compared as written (upper case).
-- Same rule in `ZPTP_SPLIT_VAL_BATCH_COPY` v0.9 (`F_CHECK_SOURCE_BATCH`, `F_NORM_BATCH`, `F_STRIP_BATCH`),
+- Same rule in `ZPTP_SPLIT_VAL_BATCH_COPY` v0.9 (`F_NORM_BATCH`, `F_STRIP_BATCH`; v1.0: `F_MATCH_FILE`),
   which replaces the v0.4 fallback (as written first, then completed with zeros). The ALV message notes
   when the batch used differs from the file value.
 
