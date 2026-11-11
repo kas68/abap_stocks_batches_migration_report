@@ -154,10 +154,11 @@ With any of the three filters S_MATNR, S_CHARG or S_MTART, the "SAP stock missin
 
 | Parameter | Label | Mandatory | Default | Meaning and behaviour |
 | --- | --- | --- | --- | --- |
-| P_RUNID | Run ID, blank=new | no | blank | Run identifier. Blank: a new identifier HBM + date + time is generated. Filled: the run is attached to this RUN_ID with the next sequence (001, 002, …). Required with P_REPRC and P_DEL. |
-| P_REPRC | Reprocess errors | no | unchecked | Reprocesses only the lines with status E in the previous sequence of the RUN_ID. Requires a RUN_ID that exists in ZPTP_MOV_EXEC. |
+| P_BGD | Background - all lines | exclusive choice | checked | Every line is processed in one run, as before (dialog, or job with P_JOB). |
+| P_ONL | Online - post line by line | exclusive choice | — | Dialog only. The file is read and checked, nothing is posted: the ALV lists one row per line, status R (ready). The user ticks one or several lines and presses Post; after one confirmation each line, in file order, goes through the same checks and posting as in background mode, is logged in ZPTP_MOV_EXEC under the same RUN_ID and sequence, and its row shows the result. A failed line can be posted again; a posted or simulated line cannot. Lines rejected by a file check or with zero quantity (without P_ZBAT) are logged at once. P_TEST is hidden and ignored: the postings are real. Not with P_JOB. All options and transfer modes. |
 | P_FULL | Full validation | exclusive choice | checked | Standard mode: all checks apply (see 2.3). |
 | P_DIR | Direct transfer | exclusive choice | — | Skips the valuation segment check, the quantity check and the reverse reconciliation (see 2.3). |
+| P_FQTY | Force qty to source stock | no | unchecked | Option 1, stock types 1–3: the file quantities are replaced by the whole stock of each material + batch in the source plant for the stock type transferred. Several lines for one material + batch: the first line with a quantity takes the stock, the others 0. No stock: status Z. File Qty keeps the file value; a changed line carries warning 060. The quantity check then passes. Ignored by option 2 and project stock. |
 | P_TEST | Simulation | no | checked | Checked: simulation, no stock posting and no batch creation. Unchecked: real run. |
 | S_STAT | ALV status | no | blank | Restricts the ALV list to the selected status values (see 5.1); several values, ranges or exclusions can be entered, and F4 lists the values with their meaning. Blank: all values. Display only: every line is still processed and logged in ZPTP_MOV_EXEC. If no row matches, a message is shown instead of the list. |
 
@@ -165,6 +166,8 @@ With any of the three filters S_MATNR, S_CHARG or S_MTART, the "SAP stock missin
 
 | Parameter | Label | Mandatory | Default | Meaning and behaviour |
 | --- | --- | --- | --- | --- |
+| P_RUNID | Run ID, blank=new | no | blank | Run identifier. Blank: a new identifier HBM + date + time is generated. Filled: the run is attached to this RUN_ID with the next sequence (001, 002, …). Required with P_REPRC and P_DEL. |
+| P_REPRC | Reprocess errors | no | unchecked | Reprocesses only the lines with status E in the previous sequence of the RUN_ID. Requires a RUN_ID that exists in ZPTP_MOV_EXEC. |
 | P_DEL | Delete run ID | no | unchecked | Deletes the rows of the entered RUN_ID from both log tables, after confirmation. No other processing is run. See section 6. |
 | P_CLR | Delete all logs before the run | no | unchecked | Empties ZPTP_MOV_EXEC and ZPTP_BATCH_EXT completely, then runs the migration normally (the RUN_ID sequence restarts at 001). Needs the table authorization (S_TABU_NAM) on both tables and a confirmation popup (none in background). The log of runs that posted documents is deleted too. Cannot be combined with P_REPRC. |
 
@@ -296,6 +299,7 @@ Each material document is committed in the same logical unit of work as its log 
 | 026 | Batch management differs between the two plants (option 2) | E |
 | 054 | Run parameters (option, transfer mode, stock checked, quantity check on/off, mode, zero-stock batches), one row per run | W |
 | 055 | Mode 3: QI stock held by open inspection lots stays in the source plant (quantity per material / batch / storage location) | W |
+| 060 | Quantity of the line forced to the stock of the source plant (P_FQTY), file quantity in brackets | W |
 
 Errors returned by the SAP BAPIs (batch creation, goods movement) are logged with their own message class and number.
 

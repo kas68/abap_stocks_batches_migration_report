@@ -46,6 +46,179 @@ This repository holds the code only; version history is kept in git (the former
 - Messages 054 and 055 to create in SE91. Anything counting `ZPTP_MOV_EXEC` rows per file line must
   filter on `BWART = '301'`.
 
+## What changed in v1.11 (file name check)
+- `F_CHECK_FILE_NAME`, called from `F_CHECK_SCREEN` (on execution) and from `F_READ_INPUT` (so that a
+  background job is checked too): the file name, without its directory and in upper case, must match
+  the stock type transferred: 1 unrestricted → contains `UNRESTRICTED`; 2 blocked → contains `BLOCK`;
+  3 QI without lot → contains `QI` and not `QI_LOT`. Otherwise error, nothing is read or posted.
+  Applies to options 1 and 2; transfer mode 4 (project stock) reads no file.
+- New checkbox `P_NOFNM` *Deactivate file name check* in Run control (blank by default) bypasses it. The
+  run header and the run log show whether the check was on.
+- The default names produced by ZPTP_SPLIT_VAL_MIG_UTILITY (`..._UNRESTRICTED_...`, `..._BLOCKED_...`,
+  `..._QI_...`, `..._QI_LOT_...`) pass the check for their own stock type.
+
+## What changed in v1.12 (forced quantity)
+- New checkbox `P_FQTY` *Force qty to source stock* in Run control (blank by default). Option 1,
+  transfer modes 1 – 3 (option 2 and mode 4 already move the whole stock and ignore it).
+- `F_FORCE_QTY`, called after `F_READ_SAP_STOCK` and the reprocess filter, before
+  `F_CHECK_SAP_NOT_IN_FILE`: the quantity of every usable file line is replaced by the stock of its
+  material + batch that the transfer mode moves in `P_WSRC` (`GT_STOCK-MFREE`: unrestricted, blocked,
+  or QI without inspection lot, all storage locations). Several lines for one material + batch: the
+  first line with a quantity in the file (else the first line) carries the stock, the others get 0.
+  No stock in the source plant: 0, so the line ends in status Z (and `P_ZBAT` applies).
+- The file quantity is kept in `GTY_INPUT_RAW-MFILE` and shown in *File Qty* (`QTY_INPUT`); a line whose
+  quantity changes carries a warning (message 060, type W). `GT_INPUT_SUM` is rebuilt, so the
+  quantity check 3.5 compares the forced quantities and passes.
+- Run header and run log (054) show `quantity: forced to stock of <plant>` or `from file`.
+- Message 060 to create in SE91; selection text `P_FQTY`.
+
+## What changed in v1.13 (online mode)
+- New radio buttons in Run control: `P_BGD` *Background - all lines* (default) and `P_ONL` *Online - post
+  line by line*. Background runs exactly as before (in dialog, or as a job with `P_JOB`).
+- Refactoring, no change of behaviour: the loop bodies of `F_PROCESS_LINES` and `F_PROCESS_PROJECT` are
+  now `F_PROCESS_LINE` and `F_PROCESS_PRJ_LINE` (one input line each). The batch-extension memo
+  (`GT_DONE`) and the mode-4 valuation-type memo (`GT_PRJ_VT`, type `GTY_PRJ_VT`) became global.
+  `F_ADD_LOG` copies `GV_CUR_LINE` (index of the line in `GT_INPUT_RAW`) to the new ALV field `LINE_ID`.
+- Online: `F_ONLINE_LIST` runs instead of the posting loop, after all the preparation steps (file
+  checks, stock, forced quantity, reconciliation, max. materials, already posted). One ALV row per line,
+  status **R** (ready, ALV only, not written to ZPTP_MOV_EXEC). Lines that cannot be posted (rejected by
+  a file check, zero quantity without `P_ZBAT`) are processed and logged at once. `GT_LINE` keeps the
+  state of every line: R ready, F failed (can be posted again), D posted / simulated, N nothing to post.
+- ALV: selection box `SEL`, column *Line*, sorted by line; GUI status `ZMIG_ALV` (`F_SET_STATUS`) and
+  `F_USER_COMMAND`: function `POST` takes exactly one ticked line, asks for confirmation, removes a
+  failed batch extension / valuation type of that batch from the memo, runs `F_PROCESS_LINE` (or
+  `F_PROCESS_PRJ_LINE`), saves the log (same RUN_ID and sequence) and replaces the rows of the line with
+  the result rows. Done = a T row, or a 301 row in S / W with a document (not 022), or a zero-stock batch
+  created; a failed 344 / 322 reversal also closes the line (stock to put back by hand).
+- `P_TEST` applies to the online posting (simulation). `P_ONL` with `P_JOB` is refused on the screen,
+  and in a background job (`SY-BATCH`).
+- To create in SE41: GUI status **ZMIG_ALV** of program ZPTP_SPLIT_VAL_MIG, copied from program SAPLKKBL,
+  status STANDARD_FULLSCREEN, with a new application-toolbar function **POST** (text *Post*, icon
+  ICON_POSTING, function type blank). Selection texts `P_BGD` and `P_ONL`.
+
+## What changed in v1.33 (only file items of the source plant)
+- New checkbox `P_FONLY` *Only file items in src plant* in Run control (blank by default), option 1 only.
+- `F_KEEP_FILE_ITEMS` (after `F_VALIDATE_LINES`, before `F_AGGREGATE_INPUT`): a usable file line stays
+  only if its material is extended to `P_WSRC` (`GT_MARC`) and, with a batch, the batch exists in
+  `P_WSRC` (MCHA, one `FOR ALL ENTRIES` select). Other lines are removed and logged with status X,
+  message 061 (type W). Lines already rejected by a file check stay and are reported as before.
+- `F_CHECK_SAP_NOT_IN_FILE` is skipped: SAP stock not in the file is not added (no 010 / 011 rows).
+- Run header and run log 054 show it. Message 061 to create in SE91; selection text `P_FONLY`.
+- Blank: unchanged. Option 2 (materials not in the file) and mode 4 (no file) ignore it.
+
+## What changed in v1.32 (Simulation checkbox visible again)
+- Fix of v1.29: `AT SELECTION-SCREEN OUTPUT` set `SCREEN-ACTIVE` with `COND #( ... THEN 0 ELSE 1 )`; the
+  integer converted to the 1-character field gave `*`, which hid `P_TEST` in every mode. Now set with
+  the text literals `'0'` / `'1'`.
+
+## What changed in v1.31 (message class hidden)
+- ALV column *Msg Class* (`MSGID`) hidden by default (`NO_OUT`); still in the field catalog, so it can be
+  shown with the layout button, and still sorted on and written to ZPTP_MOV_EXEC.
+
+## What changed in v1.30 (show only SAP variance >= 0)
+- New checkbox `P_SVPOS` *Only SAP variance >= 0* in Run control (blank by default). `F_DISPLAY_ALV`
+  removes the rows with a negative SAP variance after `F_ALV_DECORATE` and the `S_STAT` filter. Display
+  only, like `S_STAT`: every line is still processed and logged in background mode; in Online mode the
+  hidden lines are not listed, so they cannot be posted. Rows without SAP variance (run rows) stay.
+- Selection text `P_SVPOS`.
+
+## What changed in v1.29 (Simulation ignored in Online mode)
+- `P_ONL` has `USER-COMMAND exm`; `AT SELECTION-SCREEN OUTPUT` hides `P_TEST` (and its label) when Online
+  is selected. At `START-OF-SELECTION` `P_TEST` is cleared in Online mode, so a variant saved with
+  Simulation ticked cannot turn the online postings into simulations. Online always posts for real; each
+  Post asks for confirmation. Background keeps `P_TEST` as before.
+
+## What changed in v1.28 (posted rows green with their success message)
+- `F_ADD_LOG`: the warning of the line (`AUTOWARN`: 010 added from SAP stock, 057 already transferred,
+  060 quantity forced) is no longer put in front of the message nor turns the message type into W on a
+  row posted or simulated (status S / T): the row keeps its success message ("Material document …",
+  "Simulation OK …") and type, in the ALV and in ZPTP_MOV_EXEC. Other rows keep the warning.
+- `F_STATUS_COLOR` (used by `F_ALV_DECORATE` and `F_ALV_BANDS`): status first — E or message type E / A / I
+  red, S / T green, W yellow — so a posted row is green even when it carries a message of type W.
+
+## What changed in v1.27 (green SAP variance)
+- `F_ALV_DECORATE`: a SAP variance of 0 or more adds a green cell colour (col 5, intensified, inverse) for
+  `SAP_VAR`; negative stays red. Rows whose material + batch has neither stock nor quantity to transfer
+  (no SAP variance calculated) and run rows get no colour.
+
+## What changed in v1.26 (simulation checkbox)
+- `P_TEST` *Simulation* moved from Run control to block B8 *Execution mode*, below `P_JOB`. Still ticked
+  by default; no change of behaviour.
+
+## What changed in v1.25 (background job checkbox)
+- `P_JOB` *Run as background job* moved from Run control to block B8 *Execution mode*, below
+  Online / Background. No change of behaviour (still refused with Online).
+
+## What changed in v1.24 (whole-row red)
+- `F_ALV_BANDS`: a red row (message type E / A / I) is coloured whole too (`C611`). The material band
+  shows only on rows without a status colour (online R rows, run rows without status). The status cell
+  colours (`CELLCOL`) and the red SAP Variance cell are unchanged.
+
+## What changed in v1.23 (whole-row green / yellow)
+- `F_ALV_BANDS`: a row in yellow (message type W) or green (status S / T, or message type S) is coloured
+  whole (`C311` / `C511`), over the material band. Red (E / A / I) stays on the cells Status, Msg Type and
+  Message, the rest of the row keeps the band. The red SAP Variance cell is kept on any row.
+
+## What changed in v1.22 (SAP variance = stock - quantity to transfer)
+- *SAP Variance* is now **SAP stock − quantity the run transfers**, per material + batch (+ WBS element
+  in mode 4), whatever the posting status. SAP stock: `GT_STOCK-MFREE` (type moved, all storage
+  locations, read at the start of the run); mode 4: `GT_PRJ_LOC`. Quantity transferred: sum of
+  `GT_INPUT_RAW-MENGE` of the lines not rejected (`BAD` blank): file quantity, forced quantity
+  (`P_FQTY`), or whole stock (option 2, mode 4). Replaces the v1.17 rule (stock − posted rows), so the
+  value is known before posting (online R rows) and no longer depends on the row's *SAP Stock* (the
+  055 rows of mode 3 no longer give a false negative). Red cell and warning when negative, as before.
+- New helper `F_POSID` (WBS internal number → external key).
+
+## What changed in v1.21 (batch management flag on every row)
+- `F_FILL_XCHPF`: `XCHPF` is taken from the material master buffer `GT_MARC` (`BATCHMGD` of the source
+  plant, else of the target plant) for every row with a material. Called by `F_ADD_LOG` (so the flag is
+  also written to ZPTP_MOV_EXEC-XCHPF) and by `F_ALV_DECORATE` (rows not logged, such as the online
+  ready rows). Before, only the rows that found SAP stock, or a few checks, set it.
+
+## What changed in v1.20 (negative SAP variance warning)
+- `F_ALV_DECORATE`: a negative SAP variance also appends `[WARNING: SAP variance <value> <unit>: more
+  posted than the SAP stock read in plant <source> - check the stock (MMBE)]` to the message. ALV only:
+  the tag is removed and set again at every recalculation (online postings), and ZPTP_MOV_EXEC keeps the
+  original message.
+
+## What changed in v1.19 (negative SAP variance)
+- `F_ALV_DECORATE`: a negative SAP variance adds a red cell colour (col 6, intensified, inverse) for
+  `SAP_VAR` to `CELLCOL`.
+
+## What changed in v1.18 (material bands)
+- `F_ALV_BANDS` (after every sort of `GT_OUT`): the row colour alternates between two light colours
+  (`C200` / `C410`, constants of the form) at each change of material in the order shown; rows without
+  material (run parameters) keep the default colour.
+- The status colour (red E / A / I, yellow W, green S / T) moved from the whole row to the cells Status,
+  Msg Type and Message: new field `GTY_OUT-CELLCOL` (`SLIS_T_SPECIALCOL_ALV`), layout `COLTAB_FIELDNAME`.
+
+## What changed in v1.17 (SAP variance)
+- ALV column *Variance* renamed *File Variance* (field `VARIANCE` and ZPTP_MOV_EXEC-VARIANCE unchanged).
+- New ALV column *SAP Variance* (`GTY_OUT-SAP_VAR`, ALV only, not in ZPTP_MOV_EXEC): SAP stock (column
+  *SAP Stock*) minus the quantity posted for the same material + batch (+ WBS element in mode 4), summed
+  over its 301 rows with a document in status S, or T in a simulation (modes 2 / 3 in a simulation: the
+  343 / 321 rows, the only movement simulated). 0 = the whole stock of the type moved has left the
+  source plant. Calculated in `F_ALV_DECORATE`, now called before the status filter so that hidden rows
+  still count, and again after each online posting. Blank on run rows (no material).
+
+## What changed in v1.16 (post several lines)
+- Online ALV, `POST`: every ticked line in state R (ready) or F (failed) is posted, after one
+  confirmation, one after the other in file order (the order of background mode, which matters when
+  several lines share a material + batch). Each line goes through `F_ONLINE_POST_LINE` (former body of
+  the POST handler): same checks, posting, log and state rules as a single line. Ticked lines already
+  posted / simulated or with nothing to post are skipped and counted in the confirmation and the summary
+  message (posted, failed, failed reversal, skipped).
+
+## What changed in v1.15 (execution mode block)
+- `P_ONL` / `P_BGD` moved out of Run control into their own block **B8** *Execution mode*, first on the
+  screen, Online listed above Background. Background stays the default. Text symbol `B08` to create.
+
+## What changed in v1.14 (select a material by double-click)
+- Online ALV: `F_USER_COMMAND` handles the double-click (`&IC1`) with `F_SELECT_MATERIAL`: every row of
+  the material clicked is ticked, the other rows are unticked; a double-click on a material already
+  fully ticked unticks it. Since v1.16 `POST` posts all the ticked lines. Nothing to add in SE41 (`&IC1` is
+  the standard ALV double-click).
+
 ## ZPTP_SPLIT_VAL_BATCH_COPY v1.0 (all batches of the source plant)
 The run is driven by the batches of the source plant, no longer by the file:
 - `F_READ_BATCHES`: every batch of `P_WSRC` in MCHA (not flagged for deletion, within the new
@@ -289,6 +462,12 @@ leave *Dictionary Ref.* unticked, otherwise SAP replaces the text with the data 
 | P_XQI | 3 QI stock without insp. lot |
 | P_XPRJ | 4 Project stock (Q) |
 | P_NOQTY | Deactivate quantity check vs file |
+| P_NOFNM | Deactivate file name check |
+| P_FQTY | Force qty to source stock |
+| P_BGD | Background - all lines |
+| P_ONL | Online - post line by line |
+| P_SVPOS | Only SAP variance >= 0 |
+| P_FONLY | Only file items in src plant |
 | P_SPLIT | Split Valuation Materials |
 | P_NONSPL | Non split valuation materials |
 | P_WSRC | Source plant (P_WSRC) |
@@ -311,7 +490,8 @@ leave *Dictionary Ref.* unticked, otherwise SAP replaces the text with the data 
 | P_CLR | Delete all logs before the run (P_CLR) |
 
 Text symbols: `B01`=Organizational data,
-`B05`=Processing option, `B07`=Stock type transferred, `B02`=Input file, `B03`=Run control, `B04`=Maintenance.
+`B05`=Processing option, `B07`=Stock type transferred, `B02`=Input file, `B03`=Run control, `B04`=Maintenance,
+`B08`=Execution mode.
 
 Program attribute *Title* (SE38 → Attributes, shown in the window title bar):
 `STOCKS & BATCHES MIGRATION PROGRAM`.

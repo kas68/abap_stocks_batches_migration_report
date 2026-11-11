@@ -153,10 +153,11 @@ Avec l'un des trois filtres S_MATNR, S_CHARG ou S_MTART, le rapprochement « sto
 
 | Paramètre | Libellé | Obligatoire | Défaut | Signification et fonctionnement |
 | --- | --- | --- | --- | --- |
-| P_RUNID | Run ID, blank=new | non | vide | Identifiant d'exécution. Vide : un nouvel identifiant HBM + date + heure est créé. Saisi : l'exécution est rattachée à ce RUN_ID avec la séquence suivante (001, 002, …). Obligatoire avec P_REPRC et P_DEL. |
-| P_REPRC | Reprocess errors | non | non coché | Ne retraite que les lignes en statut E de la séquence précédente du RUN_ID. Exige un RUN_ID existant dans ZPTP_MOV_EXEC. |
+| P_BGD | Background - all lines | choix exclusif | coché | Toutes les lignes sont traitées en une exécution, comme avant (en dialogue, ou en job avec P_JOB). |
+| P_ONL | Online - post line by line | choix exclusif | — | Dialogue uniquement. Le fichier est lu et contrôlé, rien n'est posté : l'ALV affiche une ligne par ligne du fichier, statut R (prête). L'utilisateur coche une ou plusieurs lignes et clique sur Post ; après une confirmation unique, chaque ligne, dans l'ordre du fichier, passe par les mêmes contrôles et la même comptabilisation qu'en mode background, est journalisée dans ZPTP_MOV_EXEC sous le même RUN_ID et la même séquence, et sa ligne affiche le résultat. Une ligne en échec peut être postée à nouveau ; une ligne postée ou simulée non. Les lignes rejetées par un contrôle du fichier ou à quantité zéro (sans P_ZBAT) sont journalisées tout de suite. P_TEST est masqué et ignoré : les comptabilisations sont réelles. Incompatible avec P_JOB. Toutes options et tous modes de transfert. |
 | P_FULL | Full validation | choix exclusif | coché | Mode standard : tous les contrôles s'appliquent (voir 2.3). |
 | P_DIR | Direct transfer | choix exclusif | — | Saute le contrôle du segment de valorisation, le contrôle de quantité et le rapprochement inverse (voir 2.3). |
+| P_FQTY | Force qty to source stock | non | non coché | Option 1, types de stock 1 à 3 : les quantités du fichier sont remplacées par la totalité du stock de chaque article + lot dans l'usine source pour le type de stock transféré. Plusieurs lignes pour un même article + lot : la première ligne avec une quantité prend le stock, les autres 0. Pas de stock : statut Z. File Qty garde la valeur du fichier ; une ligne modifiée porte l'avertissement 060. Le contrôle de quantité passe alors. Ignoré par l'option 2 et le stock projet. |
 | P_TEST | Simulation | non | coché | Coché : simulation, aucune écriture de stock ni création de lot. Décoché : exécution réelle. |
 | S_STAT | ALV status | non | vide | Restreint la liste ALV aux statuts sélectionnés (voir 5.1) ; plusieurs valeurs, intervalles ou exclusions peuvent être saisis, et F4 liste les valeurs avec leur signification. Vide : toutes les valeurs. Affichage uniquement : toutes les lignes sont traitées et historisées dans ZPTP_MOV_EXEC. Si aucune ligne ne correspond, un message s'affiche à la place de la liste. |
 
@@ -164,6 +165,8 @@ Avec l'un des trois filtres S_MATNR, S_CHARG ou S_MTART, le rapprochement « sto
 
 | Paramètre | Libellé | Obligatoire | Défaut | Signification et fonctionnement |
 | --- | --- | --- | --- | --- |
+| P_RUNID | Run ID, blank=new | non | vide | Identifiant d'exécution. Vide : un nouvel identifiant HBM + date + heure est créé. Saisi : l'exécution est rattachée à ce RUN_ID avec la séquence suivante (001, 002, …). Obligatoire avec P_REPRC et P_DEL. |
+| P_REPRC | Reprocess errors | non | non coché | Ne retraite que les lignes en statut E de la séquence précédente du RUN_ID. Exige un RUN_ID existant dans ZPTP_MOV_EXEC. |
 | P_DEL | Delete run ID | non | non coché | Supprime les lignes du RUN_ID saisi dans les deux tables de log, après confirmation. Aucun autre traitement n'est exécuté. Voir la section 6. |
 | P_CLR | Delete all logs before the run | non | non coché | Vide entièrement ZPTP_MOV_EXEC et ZPTP_BATCH_EXT, puis exécute normalement la migration (la séquence du RUN_ID repart à 001). Exige l'autorisation sur les tables (S_TABU_NAM) pour les deux tables et une fenêtre de confirmation (aucune en arrière-plan). Le log des exécutions qui ont posté des documents est supprimé aussi. Incompatible avec P_REPRC. |
 
@@ -297,6 +300,7 @@ Chaque document article est validé dans la même unité de traitement que ses l
 | 026 | Gestion par lot différente entre les deux usines (option 2) | E |
 | 054 | Paramètres du run (option, mode de transfert, stock contrôlé, contrôle de quantité actif ou non, mode, lots à stock zéro), une ligne par run | W |
 | 055 | Mode 3 : stock qualité tenu par des lots de contrôle ouverts, laissé dans l'usine source (quantité par article / lot / magasin) | W |
+| 060 | Quantité de la ligne forcée au stock de l'usine source (P_FQTY), quantité du fichier entre parenthèses | W |
 
 Les erreurs renvoyées par les BAPI SAP (création de lot, mouvement) sont reprises avec leur propre classe et numéro de message.
 

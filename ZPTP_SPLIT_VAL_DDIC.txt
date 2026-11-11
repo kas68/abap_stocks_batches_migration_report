@@ -216,6 +216,8 @@ MESSAGE CLASS  ZPTP_SPLIT_VAL  (SE91) - used by the program
 058  No active entry in ZPTP_301_VALTYPE for plant &1, material type &2,
      fiscal year &3                                                 [v1.9]
 059  Valuation type &1 set on batch &2 in plant &3                  [v1.9]
+060  Quantity forced to the stock of plant &1: &2 &3 (file &4)     [v1.12]
+061  Material &1 batch &2 not in source plant &3 - line not treated [v1.33]
 (The program passes MSGID/MSGNO together with a free text in MSGTX; the entries
  above are required so MSGID/MSGNO resolve to a text when the log is reported on.
  009 is also used when the material number cannot be converted (MATN1).
