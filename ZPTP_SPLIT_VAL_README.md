@@ -96,6 +96,12 @@ This repository holds the code only; version history is kept in git (the former
   status STANDARD_FULLSCREEN, with a new application-toolbar function **POST** (text *Post*, icon
   ICON_POSTING, function type blank). Selection texts `P_BGD` and `P_ONL`.
 
+## What changed in v1.36 (ATC: DELETE without WHERE)
+- `F_CLEAR_LOGS` (option `P_CLR`): the two `DELETE FROM` without WHERE condition on ZPTP_MOV_EXEC and
+  ZPTP_BATCH_EXT are intended (emptying the tables is the purpose of the option, guarded by S_TABU_NAM
+  and a confirmation popup). Pseudo-comment `"#EC CI_NOWHERE` added on both statements; no change of
+  behaviour.
+
 ## What changed in v1.35 (batch numbers with "," or ".")
 - `F_RESOLVE_BATCH`: a file batch holding a comma or a full stop is looked up in MCHA (material +
   source plant + batch) as written, then with every "," and "." swapped (`LCL_HELP=>SWAP_PUNCT`,

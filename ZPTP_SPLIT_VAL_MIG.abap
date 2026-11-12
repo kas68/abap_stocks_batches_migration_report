@@ -3,7 +3,7 @@
 *&---------------------------------------------------------------------*
 *& Project : HBM - Split Valuation migration
 *& Scope   : Clearing of batch stocks / Inter-plant transfer
-*& Version : v1.35
+*& Version : v1.36
 *& Package : ZPTP_SPLIT_VAL        Message class: ZPTP_SPLIT_VAL
 *&
 *&---------------------------------------------------------------------*
@@ -1882,9 +1882,13 @@ FORM f_clear_logs CHANGING cv_ok TYPE abap_bool.
     ENDIF.
   ENDIF.
 
-  DELETE FROM zptp_mov_exec.
+* Emptying both tables is the purpose of this option (P_CLR): the
+* missing WHERE condition is intended. Guarded by S_TABU_NAM above and,
+* in dialog, by the confirmation popup. ATC exemption: CI_NOWHERE.
+*                                                              [v1.36]
+  DELETE FROM zptp_mov_exec.                              "#EC CI_NOWHERE
   DATA(lv_mov) = sy-dbcnt.
-  DELETE FROM zptp_batch_ext.
+  DELETE FROM zptp_batch_ext.                             "#EC CI_NOWHERE
   DATA(lv_ext) = sy-dbcnt.
   COMMIT WORK.
 
