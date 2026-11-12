@@ -4,7 +4,7 @@
 *& Project : HBM - Split Valuation migration
 *& Scope   : Copy of batch master data from the source plant to the
 *&           target plant, enriched with the valuation type of a file
-*& Version : v1.0
+*& Version : v1.1
 *& Package : ZPTP_SPLIT_VAL
 *&
 *&---------------------------------------------------------------------*
@@ -35,6 +35,13 @@
 *& leading zeros to 10 characters and matched first in that form against
 *& the source batches; when that fails, the form without leading zeros
 *& is tried. Non-numeric batches are compared as written (upper case).
+*& v1.1 - batch with "," or ".": matched as written first; when no
+*& source batch has that number, with every "," and "." swapped
+*& (24.105 -> 24,105). The original wins when both exist (warning in
+*& the message: possible duplicate batches). A match by the swapped
+*& value uses the SAP batch and shows the file batch and the flag
+*& "Punct. swapped" in the list. Neither exists: the file line is an
+*& error item showing both values. The file is never changed.
 *&
 *& Checks per batch (status E, batch not copied, otherwise):
 *&   - the material is extended to the target plant and batch-managed in
@@ -133,6 +140,8 @@ TYPES: BEGIN OF gty_item,
          bad   TYPE abap_bool,
          msg   TYPE bapi_msg,
          note  TYPE bapi_msg,            " information, e.g. batch completed [v0.4]
+         fcharg TYPE charg_d,            " batch as in the file [v1.1]
+         punct TYPE abap_bool,           " matched with "," / "." swapped [v1.1]
          pstat TYPE c LENGTH 1,          " status before posting: R / A / E [v0.8]
          pmsg  TYPE bapi_msg,            " its message [v0.8]
        END OF gty_item,
@@ -147,6 +156,8 @@ TYPES: BEGIN OF gty_out,
          charg   TYPE charg_d,
          bwtar   TYPE bwtar_d,
          split   TYPE abap_bool,         " split-valuated in the target plant [v1.0]
+         fcharg  TYPE charg_d,           " batch as in the file [v1.1]
+         punct   TYPE abap_bool,         " "," / "." swapped to match [v1.1]
          message TYPE bapi_msg,
          rowcolor TYPE c LENGTH 4,       " ALV row colour [v0.2]
          stattx   TYPE c LENGTH 20,      " status in words, ALV grouping [v0.5]
@@ -738,6 +749,7 @@ FORM f_match_file.
          END OF lty_idx.
   DATA: lt_idx  TYPE SORTED TABLE OF lty_idx WITH UNIQUE KEY matnr charg,
         lv_try  TYPE charg_d,
+        lv_alt  TYPE charg_d,                                     " [v1.1]
         ls_idx  TYPE lty_idx.
 
   LOOP AT gt_item INTO DATA(ls_item).
@@ -762,14 +774,48 @@ FORM f_match_file.
       IF <ls_item>-line = 0.
         <ls_item>-line  = <ls_file>-line.
         <ls_item>-bwtar = <ls_file>-bwtar.
+        <ls_item>-fcharg = <ls_file>-charg.                       " [v1.1]
         IF <ls_file>-charg <> <ls_item>-charg.
           <ls_item>-note = |batch { <ls_file>-charg } of the file matched as { <ls_item>-charg }|.
+        ENDIF.
+*       batch with "," or ".": the original wins; warn when the
+*       swapped value exists too (possible duplicate batches)  [v1.1]
+        IF <ls_file>-charg CA ',.'.
+          PERFORM f_swap_punct USING <ls_file>-charg CHANGING lv_alt.
+          READ TABLE lt_idx TRANSPORTING NO FIELDS
+               WITH TABLE KEY matnr = <ls_file>-matnr charg = lv_alt.
+          IF sy-subrc = 0.
+            <ls_item>-note = |WARNING: batches { <ls_file>-charg } and { lv_alt } both exist in | &&
+                             |plant { p_wsrc } - { <ls_file>-charg } (as in the file) used; check | &&
+                             |for duplicate batches|.
+          ENDIF.
         ENDIF.
       ELSEIF <ls_file>-bwtar <> <ls_item>-bwtar.
         <ls_item>-multi = abap_true.
       ENDIF.
     ENDLOOP.
   ENDDO.
+
+* pass 3: batch with "," or "." not found as written: punctuation
+* swapped (24.105 -> 24,105)                                    [v1.1]
+  LOOP AT gt_file ASSIGNING <ls_file> WHERE bad = abap_false AND id = 0.
+    CHECK <ls_file>-charg CA ',.'.
+    PERFORM f_swap_punct USING <ls_file>-charg CHANGING lv_alt.
+    READ TABLE lt_idx INTO ls_idx WITH TABLE KEY matnr = <ls_file>-matnr charg = lv_alt.
+    CHECK sy-subrc = 0.
+    <ls_file>-id = ls_idx-id.
+    READ TABLE gt_item ASSIGNING <ls_item> WITH TABLE KEY id = ls_idx-id.
+    IF <ls_item>-line = 0.
+      <ls_item>-line   = <ls_file>-line.
+      <ls_item>-bwtar  = <ls_file>-bwtar.
+      <ls_item>-fcharg = <ls_file>-charg.
+      <ls_item>-punct  = abap_true.
+      <ls_item>-note   = |batch { <ls_file>-charg } of the file matched as { <ls_item>-charg } | &&
+                         |(punctuation swapped)|.
+    ELSEIF <ls_file>-bwtar <> <ls_item>-bwtar.
+      <ls_item>-multi = abap_true.
+    ENDIF.
+  ENDLOOP.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
@@ -864,10 +910,18 @@ FORM f_file_leftovers.
       CHECK ls_file-matnr IN s_matnr.
       PERFORM f_norm_batch  USING ls_file-charg CHANGING lv_norm.
       PERFORM f_strip_batch USING ls_file-charg CHANGING lv_strip.
+      IF ls_file-charg CA ',.'.                                   " [v1.1]
+        PERFORM f_swap_punct USING ls_file-charg CHANGING lv_strip.
+        CHECK ls_file-charg IN s_charg OR lv_strip IN s_charg.
+        ls_item-msg = |Batch not found: { ls_file-charg } (as in the file) and { lv_strip } | &&
+                      |(punctuation swapped) do not exist for material | &&
+                      |{ ls_file-matnr ALPHA = OUT } in plant { p_wsrc } (or flagged for deletion)|.
+      ELSE.
       CHECK lv_norm IN s_charg OR lv_strip IN s_charg.
       ls_item-msg = |Batch { lv_norm } of material { ls_file-matnr ALPHA = OUT } not found in plant | &&
                     |{ p_wsrc }{ COND string( WHEN lv_strip <> lv_norm THEN | (nor { lv_strip })| ) } | &&
                     |or flagged for deletion - check the batch number in the file|.
+      ENDIF.
     ELSE.
       ls_item-msg = ls_file-msg.
     ENDIF.
@@ -897,6 +951,16 @@ FORM f_norm_batch USING    iv_charg TYPE charg_d
   ENDIF.
   SHIFT cv_norm RIGHT DELETING TRAILING space.
   OVERLAY cv_norm WITH '0000000000'.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_SWAP_PUNCT                                      [v1.1]
+*&      Every "," replaced by "." and every "." by "," (one pass).
+*&---------------------------------------------------------------------*
+FORM f_swap_punct USING    iv_charg TYPE charg_d
+                  CHANGING cv_alt   TYPE charg_d.
+  cv_alt = iv_charg.
+  TRANSLATE cv_alt USING ',..,'.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
@@ -1030,6 +1094,8 @@ FORM f_item_to_out USING    is_item TYPE gty_item
   cs_out-charg = is_item-charg.
   cs_out-bwtar = is_item-bwtar.
   cs_out-split = is_item-split.
+  cs_out-fcharg = is_item-fcharg.                               " [v1.1]
+  cs_out-punct = is_item-punct.                                 " [v1.1]
 ENDFORM.
 
 *&---------------------------------------------------------------------*
@@ -1277,6 +1343,8 @@ FORM f_display_alv.
   MODIFY lt_fcat FROM ls_fcat INDEX lines( lt_fcat ).
   add_col 'MATNR'   'Material'.
   add_col 'CHARG'   'Batch'.
+  add_col 'FCHARG'  'File batch'.                              " [v1.1]
+  add_col 'PUNCT'   'Punct. swapped'.                          " [v1.1]
   add_col 'BWTAR'   'Val.Type'.
   add_col 'SPLIT'   'Split val.'.                              " [v1.0]
   ls_fcat-checkbox = abap_true.

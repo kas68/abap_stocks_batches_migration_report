@@ -54,6 +54,11 @@ RUN_MODE           ZDELOT_RUN_MODE       Execution mode (F/D)
 TESTRUN            XFELD (CHAR1)         'X' = simulation, no posting
 MATNR              MATNR                 Material
 CHARG              CHARG_D               Batch (blank for non-batch material)
+                                         = batch as it exists in SAP
+CHARG_FILE         CHARG_D               Batch as in the input file [v1.35]
+PUNCT_SUB          XFELD (CHAR1)         'X' = matched with "," and "."
+                                         swapped (CHARG <> CHARG_FILE)
+                                         [v1.35]
 XCHPF              XCHPF                 'X' = batch-managed material
 BWTAR              BWTAR_D               Valuation type (target)
 WERKS_SRC          WERKS_D               Source plant (8P01)
@@ -218,6 +223,10 @@ MESSAGE CLASS  ZPTP_SPLIT_VAL  (SE91) - used by the program
 059  Valuation type &1 set on batch &2 in plant &3                  [v1.9]
 060  Quantity forced to the stock of plant &1: &2 &3 (file &4)     [v1.12]
 061  Material &1 batch &2 not in source plant &3 - line not treated [v1.33]
+062  Batch not found: &1 (as in file) and &2 (punctuation swapped),
+     material &3, plant &4                                          [v1.35]
+063  Batches &1 and &2 both exist (material &3, plant &4) - &1 used,
+     check for duplicate batches                                    [v1.35]
 (The program passes MSGID/MSGNO together with a free text in MSGTX; the entries
  above are required so MSGID/MSGNO resolve to a text when the log is reported on.
  009 is also used when the material number cannot be converted (MATN1).

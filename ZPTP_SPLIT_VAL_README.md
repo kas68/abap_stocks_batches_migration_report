@@ -96,6 +96,33 @@ This repository holds the code only; version history is kept in git (the former
   status STANDARD_FULLSCREEN, with a new application-toolbar function **POST** (text *Post*, icon
   ICON_POSTING, function type blank). Selection texts `P_BGD` and `P_ONL`.
 
+## What changed in v1.35 (batch numbers with "," or ".")
+- `F_RESOLVE_BATCH`: a file batch holding a comma or a full stop is looked up in MCHA (material +
+  source plant + batch) as written, then with every "," and "." swapped (`LCL_HELP=>SWAP_PUNCT`,
+  `TRANSLATE ... USING ',..,'`): 24.105 → 24,105.
+  - Original found: used. Swapped value found too: W row, message 063 (possible duplicate batches).
+  - Only the swapped value found: `CHARG` = SAP batch for every later step, `CHARG_FILE` = file batch,
+    `PUNCT` = X.
+  - Neither: the line fails (`BAD`, message 062 with both values), Material + Batch added to
+    `GT_BADKEY`.
+  - Other batches: leading-zero rule of v1.10, unchanged. The file is never changed.
+- **DDIC:** two new fields in ZPTP_MOV_EXEC, `CHARG_FILE` (CHARG_D, batch as in the file) and `PUNCT_SUB`
+  (XFELD, punctuation swapped), filled by `F_ADD_LOG` from `GTY_OUT`. Adjust the table in SE11 (append
+  at the end, activate) **before** activating the program. Messages 062 and 063 to create in SE91.
+- ALV: new columns *File batch* and *Punct. swapped*.
+- ZPTP_SPLIT_VAL_BATCH_COPY v1.1: same rule in `F_MATCH_FILE` (pass 3, `F_SWAP_PUNCT`); duplicate warning
+  in the item note; columns *File batch* and *Punct. swapped*; a file line found in neither form is an
+  error item showing both values (`F_FILE_LEFTOVERS`).
+
+## What changed in v1.34 (simulation without log)
+- New checkbox `P_NOLOG` *Simulation without log* in block B8, below `P_TEST`, **ticked by default**.
+  With `P_TEST` and `P_NOLOG` ticked, `F_FLUSH_LOGS` clears the buffered rows instead of writing them:
+  nothing goes to ZPTP_MOV_EXEC or ZPTP_BATCH_EXT, the result is in the ALV list (spool in a job) only,
+  and the RUN_ID sequence is not used up. Real runs always write their log.
+- `P_TEST` has `USER-COMMAND tst`; `AT SELECTION-SCREEN OUTPUT` hides `P_NOLOG` in Online mode and makes
+  it display-only when `P_TEST` is unticked. Run header and run log 054 show the log setting.
+- Selection text `P_NOLOG`.
+
 ## What changed in v1.33 (only file items of the source plant)
 - New checkbox `P_FONLY` *Only file items in src plant* in Run control (blank by default), option 1 only.
 - `F_KEEP_FILE_ITEMS` (after `F_VALIDATE_LINES`, before `F_AGGREGATE_INPUT`): a usable file line stays
@@ -468,6 +495,7 @@ leave *Dictionary Ref.* unticked, otherwise SAP replaces the text with the data 
 | P_ONL | Online - post line by line |
 | P_SVPOS | Only SAP variance >= 0 |
 | P_FONLY | Only file items in src plant |
+| P_NOLOG | Simulation without log |
 | P_SPLIT | Split Valuation Materials |
 | P_NONSPL | Non split valuation materials |
 | P_WSRC | Source plant (P_WSRC) |

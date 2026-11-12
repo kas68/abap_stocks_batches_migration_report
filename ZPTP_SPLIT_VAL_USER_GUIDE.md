@@ -1,372 +1,519 @@
 # ZPTP_SPLIT_VAL_MIG — User Guide
 
-2026-10-19 · program v1.1
+2026-11-11 · program v1.33
+
+This guide is for the migration team and the key users who run the stock and batch migration from plant 8P01 to plant 8Q01. It explains every option of the selection screen, which settings to choose for each step of the migration, how to read the result list, and how to fix what the report reports. Technical names are given in brackets, for example *Simulation (P_TEST)*, so that you can find each field on the screen and in the variants.
 
 ## 1. What the report does
 
-ZPTP_SPLIT_VAL_MIG moves all unrestricted stock from plant 8P01 to the split-valuated plant 8Q01 with movement type 301, using the HBM Valuation Type Input File to assign a valuation type to each material and batch. Always run it in simulation first, fix what it reports, then run it for real.
-
-For each line of the input file, the report:
-
-1. reads the unrestricted stock of the material (and batch) in 8P01, per storage location;
-2. checks the line: unit, quantity, valuation segment in 8Q01, storage locations in 8Q01, batch consistency;
-3. creates the batch in 8Q01 when it is missing, copying the source batch attributes and setting the target valuation type;
-4. posts one 301 material document per file line, one item per issuing storage location, received in the 8Q01 storage location given by the mapping table ZPTP_SLOC_MAP;
-5. writes one log row per item in table ZPTP_MOV_EXEC and shows the result in an ALV list.
-
-The report handles batch-managed and non-batch-managed materials. It does not move quality-inspection, blocked or special stock, and it does not copy batch classification.
+ZPTP_SPLIT_VAL_MIG moves stock from plant 8P01 to the split-valuated plant 8Q01 with movement type 301 (one-step plant-to-plant transfer). Missing batches are created in 8Q01 with the attributes of the 8P01 batch and the right valuation type. Every line is logged, and the result is shown in an ALV list.
 
 | Item | Value |
 | --- | --- |
-| Program | ZPTP_SPLIT_VAL_MIG (version 0.5) |
-| Screen title | STOCKS & BATCHES MIGRATION PROGRAM |
-| Start from | Area menu ZPTP_SVAL_MENU > Manage stock transfers 8P01->8Q01 > Stocks & batches migration (transaction ZPTP_SPLIT_VAL_MIG), or SE38 / SA38 |
-| Movement type | 301, one-step plant-to-plant transfer |
-| Default plants | 8P01 (source) to 8Q01 (target) |
+| Program | ZPTP_SPLIT_VAL_MIG |
+| Start from | Transaction ZPTP_SPLIT_VAL_MIG (area menu ZPTP_SVAL_MENU), or SE38 / SA38 |
+| Default plants | 8P01 (source) → 8Q01 (target) |
 | Log tables | ZPTP_MOV_EXEC (movements), ZPTP_BATCH_EXT (batches) |
-| Storage location mapping | ZPTP_SLOC_MAP (maintained with SM30) |
+| Storage location mapping | ZPTP_SLOC_MAP (SM30) |
+| Valuation types for project stock | ZPTP_301_VALTYPE |
 | Message class | ZPTP_SPLIT_VAL |
+
+### 1.1 Four stock types, one per run
+
+| Stock type | What moves | Movements | Input file |
+| --- | --- | --- | --- |
+| 1 Unrestricted | Unrestricted stock | 301 | yes |
+| 2 Blocked | Blocked stock | 343 (8P01), 301, 344 (8Q01): it arrives blocked | yes |
+| 3 QI without inspection lot | Quality inspection stock not held by an open inspection lot | 321 (8P01), 301, 322 (8Q01): it arrives in quality inspection | yes |
+| 4 Project stock (Q) | Unrestricted project stock, per WBS element | 301 Q to the same WBS element | no |
+
+To migrate everything, run the report once per stock type.
+
+**Not moved:** quality-inspection stock held by an open inspection lot (reported, message 055); sales order stock, consignment and stock at vendor (not reported); batch classification (not copied).
+
+### 1.2 What drives the run
+
+| | Option 1 — Split valuation materials | Option 2 — Non split valuation materials | Project stock (type 4) |
+| --- | --- | --- | --- |
+| Driven by | **The input file** | **SAP stock of 8P01** | **SAP project stock of 8P01** |
+| The file | Says what to move: material, batch, valuation type, quantity | Only says which materials to **leave out** | Not read |
+| Valuation type | From the file | None (the material must not be split-valuated in 8Q01) | From the batch in 8Q01, else from ZPTP_301_VALTYPE |
+| Stock of 8P01 not in the file | Added and posted with a warning (Full mode), unless "Only file items in src plant" is ticked | This is what is moved | — |
+
+Option 1 moves what the file defines; option 2 moves everything else that is not split-valuated in 8Q01. Run with the same file, they cover the whole plant except split-valuated materials missing from the file.
 
 ## 2. Before you run it
 
-Check these points before the first simulation; each one that is missing shows up later as a blocked line.
+### 2.1 Set-up in 8Q01
 
-### 2.1 Target plant set-up (8Q01)
+- [ ] Plant 8Q01 exists and is different from the source plant.
+- [ ] ZPTP_SLOC_MAP (SM30) has one entry per storage location of 8P01 holding stock: 8P01 / source storage location → 8Q01 / target storage location. A missing entry blocks the line (024).
+- [ ] Every target storage location of ZPTP_SLOC_MAP exists in 8Q01. A missing one blocks the line (023).
+- [ ] Every material is extended to 8Q01, with a valuation segment for each valuation type of the file. A missing segment blocks the line (003, Full mode).
+- [ ] Batch management is the same in 8P01 and 8Q01.
+- [ ] Automatic creation of storage location data is allowed for movement type 301 (OMB3), or the material is already maintained in the receiving storage locations; otherwise the 301 fails with an SAP message.
+- [ ] Project stock: ZPTP_301_VALTYPE has active entries for the fiscal year of the posting date.
 
-- [ ] Plant 8Q01 exists (T001W) and is not the same as the source plant.
-- [ ] Table ZPTP_SLOC_MAP (SM30) has one entry per storage location of 8P01 that holds stock: source plant 8P01, source storage location, target plant 8Q01, target storage location. A missing entry blocks the line with message 024. Several source storage locations may point to the same target one.
-- [ ] Every target storage location in ZPTP_SLOC_MAP exists in 8Q01 (T001L). A missing one blocks the line with message 023.
-- [ ] Every material in the file is extended to 8Q01, with a valuation segment for each valuation type used in the file (MBEW, valuation area = plant). A missing segment blocks the line with message 003 in Full Validation mode.
-- [ ] Batch management in 8Q01 matches 8P01 for each material.
+### 2.2 The input file (stock types 1 to 3)
 
-### 2.2 The input file
+Build it with **ZPTP_SPLIT_VAL_MIG_UTILITY** (transaction ZPTP_SPLIT_VAL_UTIL), choosing the same stock type as the migration run. Five columns, in this order:
 
-- [ ] One line per material / batch / valuation type, five columns in this order: MATNR; CHARG; BWTAR; QUANTITY; UOM.
-- [ ] Quantities in the material's base unit. For each material and batch, the file total equals the unrestricted stock in 8P01 (all storage locations), to three decimals.
-- [ ] A batch carries one valuation type only.
-- [ ] Non-batch materials: batch column blank or NO_BATCH.
-- [ ] No separator inside a value, no thousands separator, no BOM. Decimals with point or comma.
-- [ ] For a server file: uploaded in text mode (for example with CG3Z, transfer format ASC), so no stray carriage return ends up in the unit.
-
-Example:
+| Column | Content |
+| --- | --- |
+| MATNR | Material, with or without leading zeros |
+| CHARG | Batch. NO_BATCH (or blank) for a material without batch management |
+| BWTAR | Valuation type in 8Q01 |
+| QUANTITY | Quantity in the base unit; point or comma for decimals, no thousands separator |
+| UOM | Base unit, or blank |
 
 ```csv
 MATNR;CHARG;BWTAR;QUANTITY;UOM
 100234;0000004711;VT01;150,000;KG
-100234;0000004712;VT02;80,000;KG
+100234;4712;VT02;80,000;KG
 200987;NO_BATCH;VT01;1250,000;PC
 300555;;VT02;0,000;L
 ```
 
-The header line is optional. The storage location, plants, movement type and posting date are not in the file: they come from SAP stock and the selection screen.
+- The header line is optional.
+- **File name:** it must contain UNRESTRICTED (type 1), BLOCK (type 2), or QI but not QI_LOT (type 3). The utility proposes such names, for example `ZPTP_SPLIT_VAL_8P01_8Q01_UNRESTRICTED_20261111.csv`.
+- **Batch numbers:** a numeric batch is looked up with leading zeros first (4712 → 0000004712), then without. A partly padded value (004712) matches neither form.
+- **Batch numbers with "," or ".":** the batch is looked up as written first; if it does not exist in 8P01, with every comma and full stop swapped (24.105 → 24,105). The batch found in SAP is used for everything (batch creation, postings), and the list and the log show the file value (*File batch*) and the flag *Punct. swapped*. If both forms exist, the one as written is used and a warning (063) points to possible duplicate batches. If neither exists, the line fails (062) with both values in the message. The file itself is never changed.
+- One batch, one valuation type.
+- For each material and batch, the file total should equal the stock of the type moved in 8P01 (quantity check), unless you use "Force qty to source stock".
+- For a background job, copy the file to the application server first with **ZPTP_SPLIT_VAL_MIG_UPLOAD** (transaction ZPTP_SPLIT_VAL_UPLD), or with CG3Z in text mode.
 
 ### 2.3 Authorizations
 
 | Task | Authorization |
 | --- | --- |
-| Start the report | Transaction ZPTP_SPLIT_VAL_MIG (or SE38 / SA38). Needs the transaction in your role (S_TCODE) |
-| Post the 301 movements | Standard goods movement checks of BAPI_GOODSMVT_CREATE (plants 8P01 and 8Q01, movement type 301) |
-| Create batches in 8Q01 | Standard checks of BAPI_BATCH_CREATE |
-| Read a server file | Read access to the file path (S_DATASET) |
-| Delete a RUN_ID from the log | S_TABU_NAM, activity 02, table ZPTP_MOV_EXEC |
+| Start the report | Transaction ZPTP_SPLIT_VAL_MIG in your role |
+| Post movements, create or change batches | Standard checks of BAPI_GOODSMVT_CREATE, BAPI_BATCH_CREATE, BAPI_BATCH_CHANGE (plants 8P01 and 8Q01) |
+| Read a server file | S_DATASET for the path |
+| Release a background job | S_BTCH_JOB (otherwise release it in SM37) |
+| Delete a RUN_ID, empty the logs | S_TABU_NAM, activity 02, ZPTP_MOV_EXEC and ZPTP_BATCH_EXT |
 
 ### 2.4 Timing
 
-- Agree a freeze: no goods movements in 8P01 between the final simulation and the real run, or the quantity check fails with message 004.
-- Check that the posting period for the posting date is open in both plants (MMPV / OB52).
+- Agree a freeze: no goods movements in 8P01 between the final simulation and the real run, otherwise the quantity check fails (004).
+- The posting period of the posting date must be open (MMPV / OB52).
 
-## 3. The selection screen
+## 3. The selection screen, option by option
 
-The screen has four blocks. Its checks run only when you execute (F8, background job or print), not while you fill it in, so switching a radio button never raises an error.
+The screen has five blocks, in this order: **Execution mode**, **Run control** (with **Input file** and **Maintenance** inside it), **Processing option**, **Stock type transferred**, **Organizational data**. The checks of the screen run only when you execute (F8, background job, print), never while you fill it in.
 
-### 3.1 Organizational data
+### 3.1 Block "Execution mode"
 
-| Field | Default | Required | What to enter |
-| --- | --- | --- | --- |
-| Source plant (P_WSRC) | 8P01 | yes | Plant whose unrestricted stock is moved. Must exist and differ from the target plant. |
-| Target plant (P_WDST) | 8Q01 | yes | Split-valuated receiving plant. Segments, batches and storage locations are checked here. |
-| Material (S_MATNR) | blank | no | Restricts the run to some materials, in the stock and in the file. |
-| Batch (S_CHARG) | blank | no | Restricts the run to some batches. |
-| Material type (S_MTART) | blank | no | Restricts the run to some material types. Excluded materials are skipped without a message. |
-| Posting date (P_BUDAT) | today | yes | Posting date of every 301 document. The period must be open. |
+#### Online - post line by line (P_ONL)
 
-Any of the three filters also narrows the "SAP stock missing from the file" check. Use them for tests or targeted runs; run the final migration without filters.
+The report reads and checks the file exactly as in Background mode, but **posts nothing by itself**. The ALV list shows one row per line with status **R** (ready) and the quantity that would be posted. You then post from the list:
 
-### Running as a background job with a file from your PC
+1. Tick the lines to post in the selection column on the left. **Double-click** a row to tick every row of that material at once (the other rows are unticked); double-click it again to untick.
+2. Press **Post**. One confirmation popup shows what will be posted ("Post line 12: 150 KG of material 100234 batch 0000004711 …" for one line, "Post 8 lines …" for several, with the number of ticked lines that will be skipped).
+3. The lines are posted one after the other, in file order. Each line goes through every check of Background mode, is logged under the same RUN_ID, and its row is replaced by the result rows (green when posted, red when it failed). A message gives the totals: "5 line(s) posted, 1 failed, 2 skipped".
 
-A job cannot read a PC file (P_LOC). First run **ZPTP_SPLIT_VAL_MIG_UPLOAD** (transaction ZPTP_SPLIT_VAL_UPLD) in dialog: pick the PC file, enter a path on the application server (for example in the DIR_HOME or a directory agreed with Basis), execute. Then schedule ZPTP_SPLIT_VAL_MIG with *Application server* (P_SRV) and the same path in P_FILE. Text symbol B01 of the upload report: *File copy*; selection texts: P_LFILE *File on the PC*, P_SFILE *Target path on the server*, P_OVR *Overwrite without asking*.
+Good to know:
+- Lines that cannot be posted (rejected by a file check, zero quantity) show their result straight away.
+- A line already posted is skipped. A line that **failed can be posted again** once you have fixed the cause.
+- **Simulation does not apply**: the Simulation checkbox disappears when you choose Online, and every Post is real. The confirmation popup is your safeguard.
+- Online mode needs a dialog session: it cannot be combined with "Run as background job".
+- Works with both processing options and all four stock types.
 
-### 3.1 Stock type transferred (v1.0)
+Use it to post a selection of materials, to post sensitive materials one by one under control, or to finish the lines left over after a background run.
 
-| Field | Default | What it does |
+#### Background - all lines (P_BGD) — default
+
+Every line is checked and posted in one run, without any interaction. This is the standard way to run the migration, and the only way to run a simulation.
+
+#### Run as background job (P_JOB)
+
+With Background: F8 does not run the report in your session but schedules it as a background job started immediately (job ZPTP_SPLIT_VAL_MIG), with the same selection. The screen shows the job number and the RUN_ID. Follow the job in SM37; its spool holds the run header and the result list, and the log is in ZPTP_MOV_EXEC.
+
+- The file must be on the application server (Input file = Application server).
+- If "Delete all logs before the run" is ticked, the logs are emptied in your session first (with confirmation), not in the job.
+- Use it for large files: a dialog run can hit the time-out.
+
+#### Simulation (P_TEST) — ticked by default
+
+Ticked: every check runs and SAP checks the movements in test mode, but **nothing is posted and no batch is created**. Lines that would be posted get status T, and Mat.Doc shows SIMULATED. Untick it for the real run.
+
+- Stock types 2 and 3: only the first movement (343 / 321) can be simulated, because the 301 needs the stock it moves.
+- Simulated runs never count as "already transferred" and never block a later real run.
+- Hidden and ignored in Online mode.
+
+#### Simulation without log (P_NOLOG) — ticked by default
+
+Applies only with Simulation ticked (it is greyed out otherwise, and hidden in Online mode).
+
+- **Ticked:** the simulation writes **nothing** to the log tables ZPTP_MOV_EXEC and ZPTP_BATCH_EXT. The result is only in the ALV list (in the spool for a background job): keep or export it if you need it. A RUN_ID is shown in the list header for reference but is not stored, and no sequence is used up.
+- **Unticked:** the simulation is logged under its RUN_ID with the Simulation flag, like before. Use it when you want to keep the simulation (review, audit) or reprocess errors from it.
+- A real run (Simulation unticked) is always logged, whatever this checkbox says.
+
+### 3.2 Block "Run control"
+
+#### Full validation (P_FULL) — default / Direct transfer (P_DIR)
+
+| | Full validation | Direct transfer |
 | --- | --- | --- |
-| 1 Unrestricted stock (P_XUNR) | selected | One 301 per line, as before. |
-| 2 Blocked stock (P_XBLK) | — | 343 in the source plant, 301, 344 in the target plant: the stock arrives as blocked stock. |
-| 3 QI stock without inspection lot (P_XQI) | — | 321 in the source plant, 301, 322 in the target plant: the stock arrives in quality inspection. Stock held by an open inspection lot stays in the source plant. |
+| Valuation type exists in 8Q01 (003) | checked | not checked |
+| File total = SAP stock (004) | checked | not checked |
+| Stock of 8P01 missing from the file | added and posted with warning 010 | ignored |
+| All other checks | yes | yes |
 
-In modes 2 and 3 each line gives three material documents, one per movement; each is logged on its own rows (column Mvt type: 343 / 321, 301, 344 / 322). If the 301 fails, the first movement is reversed automatically (status E). If the last movement fails, the line gets status **W**: the stock is unrestricted in the target plant, post the 344 (mode 2) or 322 (mode 3) yourself with MIGO for the quantities shown. A simulation checks only the first movement. The file quantities must match the blocked stock (mode 2) or the QI stock without inspection lot (mode 3).
+Use **Full validation** for the migration. Use **Direct transfer** only for materials agreed in advance whose split valuation is not yet active in 8Q01: the 301 then carries a valuation type only if the material is split-valuated in 8Q01. Option 2 and project stock always run their own checks and ignore this choice.
 
-### 3.1a Stock scope — removed in v1.7
+#### Deactivate qty check vs file (P_NOQTY)
 
-The file is compared with the stock that is moved (block "Stock type transferred"). To migrate every stock type, run once per type with a file built by the utility for that type. "Deactivate quantity check vs file" is in the Run control block. The file name must match the stock type: it contains UNRESTRICTED (type 1), BLOCK (type 2), or QI but not QI_LOT (type 3); the names proposed by the utility already do. "Deactivate file name check" (Run control, blank by default) turns this check off.
+Turns off the check "file total per material + batch = stock of the type moved in 8P01" (004). The lines are posted with the file quantity, as long as the stock covers it (otherwise 005). All other checks stay active. Use it when stock has moved slightly since the extract and the business accepts the file quantities.
 
-"Force qty to source stock" (Run control, blank by default) ignores the quantities of the file: each material + batch of the file is transferred with its whole stock in the source plant for the stock type chosen (unrestricted, blocked, or QI without inspection lot). It applies to option 1 and stock types 1 to 3; option 2 and project stock always move the whole stock. If the file has several lines for the same material + batch, the first line with a quantity takes the whole stock and the others move nothing. A material + batch without stock in the source plant ends in status Z (no movement). The ALV column File Qty still shows the file quantity; a line whose quantity was changed carries warning 060.
+#### Deactivate file name check (P_NOFNM)
 
-### 3.1b Processing option (v0.7)
+Turns off the check that the file name matches the stock type (UNRESTRICTED / BLOCK / QI). Use it only for a file you renamed yourself and know to be right: the check protects you from posting a blocked-stock file as unrestricted stock.
 
-| Field | Default | What it does |
+#### Force qty to source stock (P_FQTY)
+
+Ignores the quantities of the file: each material + batch of the file is transferred with its **whole stock** in 8P01 for the stock type chosen.
+
+- Several lines for the same material + batch: the first line with a quantity takes the whole stock, the others move nothing.
+- No stock in 8P01: quantity 0, status Z, no movement.
+- *File Qty* still shows the file quantity; a line whose quantity changed carries warning 060 in the list until it is posted.
+- The quantity check then always passes. All other checks (batch, valuation type, storage locations) still run.
+- Option 1, stock types 1 to 3 only. Option 2 and project stock already move the whole stock.
+
+Use it when the file is right for materials, batches and valuation types, but its quantities are out of date.
+
+#### Only SAP variance >= 0 (P_SVPOS)
+
+The list shows only the rows whose **SAP Variance** (see 6.2) is 0 or more, that is where the stock of 8P01 covers what the run wants to transfer.
+
+- Background: only the list is filtered; every line is still processed and logged.
+- Online: the hidden lines are not listed, so they **cannot be posted**. Use it to post only the batches where the stock is sufficient.
+
+#### Only file items in src plant (P_FONLY)
+
+Option 1 only. Ticked, the run is limited strictly to the file:
+
+- a file line is treated only if its material is extended to 8P01 and, for a line with a batch, the batch exists in 8P01. Other lines are left out with status X (061), not as errors;
+- stock of 8P01 that is **not** in the file is **not** added (no 010 / 011 rows).
+
+Unticked, the report also picks up stock of 8P01 missing from the file (Full mode). Use it when the file is the complete, agreed scope and nothing else must move.
+
+#### ALV status (S_STAT)
+
+Shows only the selected statuses in the result list (F4 lists the values with their meaning; ranges and exclusions are possible). Blank shows everything. Only the list is filtered: every line is still processed and logged. In Online mode, ready lines (R) hidden by the filter cannot be posted.
+
+### 3.3 Sub-block "Input file"
+
+| Field | What to enter |
+| --- | --- |
+| Application server (P_SRV) | The file is on the SAP application server. The only choice for a background job. |
+| Local file (P_LOC) — default | The file is on your PC. Dialog runs only. |
+| Input file path (P_FILE) | Full path of the file. F4 lists the files of a server directory, or opens the PC file dialog. The path is case-sensitive on the server. Not needed for project stock. |
+| Field separator (P_SEP) | Column separator of the file, `;` by default. |
+
+### 3.4 Sub-block "Maintenance"
+
+#### Run ID, blank=new (P_RUNID)
+
+Blank: a new RUN_ID is created (HBM + date + time, for example HBM20261111143015). Filled with an existing RUN_ID: the run is added to it as the next sequence (002, 003, …). Needed for Reprocess errors and Delete run ID, and useful with "Max. materials per run" to continue where the previous run stopped.
+
+#### Reprocess errors (P_REPRC)
+
+Processes again only the lines in status E of the previous sequence of the RUN_ID, as a new sequence. Use it after the real run, once the causes are fixed. The "stock missing from the file" step does not run. In Online mode you can also post a failed line again directly from the list.
+
+#### Delete run ID (P_DEL)
+
+Deletes the log rows of the RUN_ID from ZPTP_MOV_EXEC and ZPTP_BATCH_EXT, after a confirmation. Nothing else runs and no stock moves. Refused when the run contains real postings: the log is the audit trail. Use it to clean up simulation runs.
+
+#### Delete all logs before the run (P_CLR)
+
+Empties both log tables completely, after a confirmation, then runs the report normally (sequences restart at 001). The log of real postings is deleted too, so use it only before the first real run, when the history is no longer needed. Needs the table authorization; cannot be combined with Reprocess errors.
+
+### 3.5 Block "Processing option"
+
+#### Split Valuation Materials (P_SPLIT) — default
+
+Option 1: the lines of the file are transferred with their valuation type and quantity (see 1.2).
+
+#### Non split valuation materials (P_NONSPL)
+
+Option 2: every material with stock of the type moved in 8P01 that is **not in the file** is transferred with its whole stock, batch created in 8Q01 when missing, **without valuation type**.
+
+- The file is still required: it lists the materials to leave out (any line, even a rejected one, excludes its material). An empty file is refused.
+- Refused materials: split-valuated in 8Q01 (025: put it in the file and use option 1), not extended to 8Q01 (014), different batch management (026).
+- Full / Direct, the quantity check, "Force qty to source stock" and "Only file items in src plant" do not apply.
+
+#### Create batches with zero stock (P_ZBAT)
+
+Creates in 8Q01 the batches that have **no stock** in 8P01, without posting any movement (status S, T in a simulation). Option 1: file lines with quantity 0 and a batch. Option 2: batches of 8P01 (not flagged for deletion) of materials not in the file. Unticked, a zero line stays in status Z and nothing is created.
+
+### 3.6 Block "Stock type transferred"
+
+| Choice | What happens |
+| --- | --- |
+| 1 Unrestricted stock (P_XUNR) — default | One 301 per line. |
+| 2 Blocked stock (P_XBLK) | 343 in 8P01 (blocked → unrestricted), 301, 344 in 8Q01 (back to blocked). Three documents per line, each on its own rows (column Mvt type). |
+| 3 QI stock without insp. lot (P_XQI) | 321 in 8P01, 301, 322 in 8Q01. Stock held by an open inspection lot stays in 8P01 (055). |
+| 4 Project stock (Q) (P_XPRJ) | No file. Project stock of each material + batch + WBS element is moved with a 301 Q to the same WBS element. |
+
+**Types 2 and 3 — when a movement fails:**
+- The 301 fails: the first movement is reversed automatically, the line ends in E and can be reprocessed. If the reversal fails too, the message says which movement to post manually.
+- The last movement (344 / 322) fails: status W; the stock is unrestricted in 8Q01: post the 344 or 322 yourself in MIGO for the quantities shown.
+
+**Type 4 — project stock:**
+- SAP drives the run, for split-valuated and non-split materials alike; the split / non-split option is ignored, and no file is read (a file of option 1 has no effect).
+- Valuation type: the one of the batch in 8Q01; a batch without valuation type gets the one of ZPTP_301_VALTYPE (059); a missing batch is created with it.
+- ZPTP_301_VALTYPE is read for the fiscal year of the posting date, most specific entry first (plant + material type, plant, material type, generic). No entry: the line is skipped (058).
+- The material must be extended to and batch-managed in 8Q01. A line that cannot be transferred gets status W and the next one is processed.
+- Full / Direct, the quantity and file name checks, "Force qty", "Only file items" and "Create batches with zero stock" do not apply.
+
+### 3.7 Block "Organizational data"
+
+| Field | Default | What to enter |
 | --- | --- | --- |
-| Split Valuation Materials (P_SPLIT) | selected | Option 1: the materials of the input file are transferred, as before. |
-| Non split valuation materials (P_NONSPL) | — | Option 2: all materials with unrestricted stock in the source plant that are **not** in the input file are transferred (whole stock, missing batches created, no valuation type). A material that is split-valuated in the target plant is refused (message 025). The input file is still required: it tells the program which materials to leave out. Full/Direct mode is ignored. Simulation, restart and log work the same way. |
-| Create batches with zero stock (P_ZBAT) | unchecked | Both options. Creates in the target plant the batch-managed batches that have no unrestricted stock in the source plant (option 1: file lines with quantity 0 and a batch; option 2: batches of the source plant not in the file). No movement is posted. Status S (T in a simulation). Unchecked: a zero line stays status Z and nothing is created. |
+| Source plant (P_WSRC) | 8P01 | Plant whose stock is moved. |
+| Target plant (P_WDST) | 8Q01 | Split-valuated receiving plant; must differ from the source. |
+| Material (S_MATNR) | blank | Restricts the run to some materials, in the stock and in the file. |
+| Batch (S_CHARG) | blank | Restricts the run to some batches. Enter the batch as stored in SAP (with leading zeros when it has them). |
+| Material type (S_MTART) | blank | Restricts the run to some material types; other materials are skipped without a message. |
+| Posting date (P_BUDAT) | today | Posting date of every document. The period must be open. |
+| Max. materials per run (P_MAXMT) | 9 999 999 | Processes only the first N materials (file order; option 2: stock order), 0 = no limit. Run again with the same RUN_ID to take the next N: the lines already posted under that RUN_ID are skipped. A W row (056) gives what was processed and what is left. |
 
-### 3.2 Input file
+The filters also narrow the "stock missing from the file" step: run the final migration without filters.
 
-| Field | Default | Required | What to enter |
-| --- | --- | --- | --- |
-| Application server (P_SRV) | — | one of the two | File on the SAP application server. The only choice that works in a background job. |
-| Local file (P_LOC) | selected | one of the two | File on your PC, uploaded through SAP GUI. Dialog runs only: select Application server for a background job. |
-| Input file path (P_FILE) | blank | yes | Full path of the file. Press F4 to browse the server directory or your PC, depending on the choice above. The path is case-sensitive on the server. |
-| Field separator (P_SEP) | ; | yes | Column separator used in the file. |
+### 3.8 Which options apply where
 
-### 3.2a Execution mode
+| Option | Option 1 (types 1-3) | Option 2 (types 1-3) | Project stock (type 4) | Online | Background |
+| --- | --- | --- | --- | --- | --- |
+| Simulation | yes | yes | yes | **no** (hidden) | yes |
+| Simulation without log | yes | yes | yes | **no** (hidden) | with Simulation |
+| Run as background job | yes | yes | yes | **no** | yes |
+| Full / Direct | yes | ignored | ignored | yes | yes |
+| Deactivate qty check | yes | ignored | ignored | yes | yes |
+| Deactivate file name check | yes | yes | ignored | yes | yes |
+| Force qty to source stock | yes | ignored | ignored | yes | yes |
+| Only file items in src plant | yes | ignored | ignored | yes | yes |
+| Only SAP variance >= 0 | yes | yes | yes | hides and blocks | hides |
+| Create batches with zero stock | yes | yes | ignored | yes | yes |
+| Reprocess errors | yes | yes | yes | yes | yes |
+| Max. materials per run | yes | yes | yes | yes | yes |
 
-| Field | Default | Required | What to enter |
-| --- | --- | --- | --- |
-| Online - post line by line (P_ONL) | — | one of the two | Dialog only. The file is checked but nothing is posted: the list shows one line per file line with status R (ready). Tick one or several lines and press **Post**; after one confirmation the lines are checked and posted for real one after the other in file order (Simulation is hidden and ignored in Online mode), each row shows its result and a message gives the totals. Ticked lines already posted, or with nothing to post, are skipped. A line that failed can be posted again once the cause is fixed; a posted line cannot. Lines rejected by a file check, or with zero quantity, are shown with their result straight away. Double-click a row to tick every row of that material (the other rows are unticked); double-click it again to untick. Cannot be combined with "Run as background job". |
-| Background - all lines (P_BGD) | selected | one of the two | Every line of the file is processed in one run, as before (in dialog, or as a job with "Run as background job"). |
-| Run as background job (P_JOB) | off | no | With Background: F8 schedules the run as a background job started immediately (SM37) instead of running it in dialog. The file must be on the application server. Not with Online. |
-| Simulation (P_TEST) | on | no | On: everything is checked, nothing is posted and no batch is created. Off: real posting. |
+Refused combinations: Online with "Run as background job"; Online in a background job; "Run as background job" with a local file; "Delete all logs" with "Reprocess errors".
 
-### 3.3 Run control
+### 3.9 Variants
 
-| Field | Default | Required | What to enter |
-| --- | --- | --- | --- |
-| Full validation (P_FULL) | selected | one of the two | Standard mode: every check applies. Use it for the migration. |
-| Direct transfer (P_DIR) | — | one of the two | Skips the valuation segment check, the quantity check and the "SAP stock missing from the file" check. Only for materials whose split valuation is not yet active in the target plant, and only when agreed. |
-| ALV status (S_STAT) | blank | no | Shows only the selected statuses in the result list. F4 lists the values with their meaning and lets you tick several; the Multiple Selection button accepts ranges and exclusions. Blank shows every status. Only the display is filtered: all lines are still processed and logged. |
-| Only file items in src plant (P_FONLY) | off | no | Option 1 only. Ticked: only the materials and batches of the file that exist in 8P01 are treated. A file line whose material is not extended to 8P01, or whose batch does not exist there, is left out with status X (message 061); stock of 8P01 that is not in the file is not added (no 010 / 011 rows). Unticked: as before. |
-| Only SAP variance >= 0 (P_SVPOS) | off | no | Shows only the rows whose SAP Variance is 0 or more, that is where the stock in 8P01 covers the quantity to transfer. Background: only the display is filtered, all lines are still processed and logged. Online: the hidden lines are not listed, so they cannot be posted. |
+Save your settings as variants (Goto → Variants → Save as Variant), for example:
 
-### 3.4 Maintenance
+| Variant | Settings |
+| --- | --- |
+| SIM_UNR | Background, Simulation (without log), Full validation, option 1, type 1, server file |
+| REAL_UNR | Same, Simulation unticked |
+| ONLINE_UNR | Online, option 1, type 1 |
+| SIM_NONSPL | Background, Simulation, option 2, type 1 |
+| REAL_PRJ | Background, type 4 (no file) |
 
-| Field | Default | Required | What to enter |
-| --- | --- | --- | --- |
-| Run ID, blank=new (P_RUNID) | blank | no | Blank creates a new RUN_ID, HBM + date + time (for example HBM20261002143015). Enter an existing RUN_ID to add the run to it as the next sequence (001, 002, ...). Required with Reprocess errors and Delete run ID. |
-| Reprocess errors (P_REPRC) | off | no | Reprocesses only the lines in status E of the previous sequence of the RUN_ID. |
-| Delete run ID (P_DEL) | off | no | With a RUN_ID, deletes that run's rows from both log tables after a confirmation. Nothing else runs. Refused when the run has real postings. |
-| Delete all logs before the run (P_CLR) | off | no | Empties both log tables completely before the migration starts, after a confirmation (no popup in a background job). The log of runs that posted documents is deleted too, so use it only when the history is no longer needed. Needs the table authorization. Cannot be used with Reprocess errors. |
+A background job scheduled in SM36 needs a variant.
 
-Save your settings as a variant (Goto > Variants > Save as Variant), for example one variant for simulation and one for the real run. A background job needs a variant.
+## 4. Choosing the settings: typical scenarios
 
-## 4. Running the migration, step by step
+| Goal | Settings |
+| --- | --- |
+| Check the file without posting | Background, **Simulation**, Full validation (Simulation without log ticked: nothing stored; untick it to keep the simulation in the log) |
+| Real migration of the file, all at once | Background, Simulation unticked, Full validation (with "Run as background job" for a large file) |
+| Post only the file, nothing else | add **Only file items in src plant** |
+| File quantities out of date | add **Force qty to source stock** |
+| Post selected materials under control | **Online**, double-click the material, Post |
+| Post only batches with enough stock | Online + **Only SAP variance >= 0** |
+| Migrate non-split materials | **Non split valuation materials**, same file, Simulation first |
+| Migrate blocked / QI stock | Stock type 2 or 3 with a file extracted for that type |
+| Migrate project stock | Stock type 4, no file |
+| Large volume in slices | **Max. materials per run** = N, same RUN_ID for each run |
+| Fix the last errors | RUN_ID of the real run + **Reprocess errors**, or Online and Post the failed lines again |
 
-The migration is a cycle: simulate, correct, simulate again until clean, post once for real, then reprocess the few lines left in error under the same RUN_ID.
+## 5. Running the migration, step by step
 
 ### Step 1 — Put the file in place
 
-1. Get the HBM Valuation Type Input File and check it against section 2.2.
-2. For a server run, upload it to the application server in text mode (CG3Z, or the tool your Basis team provides) and note the full path. Check it with AL11.
-3. For a dialog test run, you can keep the file on your PC and use Local file instead.
+1. Extract the file with the utility for the stock type, check it against 2.2.
+2. For a server run, copy it to the application server (ZPTP_SPLIT_VAL_UPLD, or CG3Z in text mode) and check it in AL11.
 
-### Step 2 — Run a full simulation
+### Step 2 — Full simulation
 
-1. Start transaction ZPTP_SPLIT_VAL_MIG (or SE38 / SA38, enter ZPTP_SPLIT_VAL_MIG and press F8).
-2. Keep plants 8P01 and 8Q01, leave Receiving SLoc and all filters blank.
-3. Set the posting date you will use for the real run.
-4. Choose Application server (or Local file), enter the path with F4 and keep the separator `;`.
-5. Leave Run ID blank, Full validation selected and Simulation ticked.
-6. Press F8.
+1. Start ZPTP_SPLIT_VAL_MIG. Execution mode: **Background**, **Simulation** ticked.
+2. Run control: Full validation; leave the other checkboxes unticked.
+3. Input file: choose the file. Maintenance: Run ID blank.
+4. Processing option: option 1. Stock type: the one of the file. Organizational data: plants, posting date of the real run, no filters.
+5. Press F8 (or tick "Run as background job" for a large file).
 
-The report shows the ALV result list (section 5). Every line is either T (would be posted), Z (zero quantity), W, I, X or E. Note the RUN_ID shown in the RUN_ID column. For a large file, run the simulation in background instead (step 6) and read the result from the spool.
+Every row is T (would be posted), Z, W, X or E. With "Simulation without log" ticked (default) the list is the only result: export it if you want to keep it. Untick it to store the simulation under its RUN_ID.
 
 ### Step 3 — Correct and simulate again
 
-1. Filter the list on status E, I and X and sort by message number.
-2. Correct the cause of each message with section 6: the file, the material master, the valuation segments, the storage location mapping (ZPTP_SLOC_MAP) or the storage locations of 8Q01.
-3. Re-upload the corrected file and repeat step 2 with Run ID blank, until no E, I or X line is left that the business has not accepted.
-
-Optionally delete old simulation runs from the log with Delete run ID (step 8).
+1. Filter on status E (and W, X), sort by Msg No.
+2. Fix each cause with section 7: the file, the material master, the valuation segments, ZPTP_SLOC_MAP, the storage locations of 8Q01.
+3. Repeat step 2 until no E line is left that the business has not accepted. Delete old simulation runs with "Delete run ID" if you wish.
 
 ### Step 4 — Prepare the real run
 
-- [ ] Final simulation is clean and the result has been reviewed and signed off.
-- [ ] Stock in 8P01 is frozen: no goods movements since the final simulation.
-- [ ] Posting period is open for the posting date.
-- [ ] The file on the server is exactly the one simulated.
+- [ ] Final simulation clean, reviewed and signed off.
+- [ ] Stock of 8P01 frozen since the final simulation.
+- [ ] Posting period open.
+- [ ] The file is exactly the one simulated.
 
 ### Step 5 — Post for real
 
-1. Start the report with the same values as the final simulation.
-2. Leave Run ID blank, so the real postings get their own RUN_ID.
-3. Untick Simulation.
-4. Execute: F8 for a dialog run, or a background job (step 6) for a large file.
-5. Write down the RUN_ID of this run. You need it for reprocessing and for the audit trail.
+**All at once:** same settings as the final simulation, **Simulation unticked**, Run ID blank, F8 (or background job). Note the RUN_ID.
 
-Each line in status S has a material document number. Batches created in 8Q01 are logged in ZPTP_BATCH_EXT.
+**Line by line:** Execution mode **Online**, same settings otherwise, F8. In the list, tick lines (or double-click a material), press **Post**, confirm. Repeat until every line you want is green.
 
-### Step 6 — Running in background
+Each S row has its material document; batches created in 8Q01 are in ZPTP_BATCH_EXT.
 
-Use a background job for large volumes: a dialog run can hit the time-out.
+### Step 6 — Reprocess the remaining errors
 
-1. Fill the screen with Application server (Local file does not work in background) and save it as a variant.
-2. In SE38, choose Program > Execute in Background, or schedule the program with SM36 using that variant.
-3. Follow the job in SM37. When it is finished, open its spool: it holds the run header (RUN_ID, sequence, mode, plants, posting date) and the result list.
+1. Fix the cause of each E line.
+2. Enter the RUN_ID of the real run, tick **Reprocess errors**, keep the other settings, Simulation unticked (tick it first to check, if you wish).
+3. Execute: only the E lines of the previous sequence are processed, as a new sequence.
 
-The posting date is checked again at the start of the job.
+### Step 7 — The other parts of the plant
 
-### Step 7 — Reprocess the remaining errors
+- Option 2 (non-split materials) with the same file: simulation, then real run.
+- Stock types 2 and 3 with their own files, project stock (type 4) without file: simulation, then real run each.
 
-After the real run, some lines may still be in status E, for example a locked material or a missing segment.
+## 6. Reading the result
 
-1. Correct the cause of each error.
-2. Start the report with the same file, enter the RUN_ID of the real run, tick Reprocess errors, keep Full validation and untick Simulation. You can tick Simulation first to check the correction.
-3. Execute. Only the E lines of the previous sequence of that RUN_ID are processed, as a new sequence (002, 003, ...).
-4. Repeat until no E line is left.
+The list has one row per line, movement and issuing storage location. The same rows are saved in ZPTP_MOV_EXEC (SE16 by RUN_ID), except the ready rows of Online mode.
 
-Reprocessing takes the E lines of the previous sequence only. If you run a simulation sequence in between, the next reprocessing starts from that simulation sequence's E lines, which are the same lines when nothing was posted.
-
-Lines in status I cannot be reprocessed: they are not in the file. Add them to the file and start a new full run (Run ID blank, no Reprocess errors).
-
-### Step 8 — Delete a run from the log (optional)
-
-1. Enter the RUN_ID, tick Delete run ID and execute.
-2. Confirm the popup. Only the log rows of ZPTP_MOV_EXEC and ZPTP_BATCH_EXT are deleted; no stock moves.
-
-Deletion is refused when the run holds real postings (status S, not simulated). Use it only to clean up simulation runs.
-
-## 5. Reading the result
-
-The ALV list has one row per file line and per issuing storage location; the Status and Message columns tell you what happened. The same rows are saved in ZPTP_MOV_EXEC, so you can read any run again later in SE16 by RUN_ID.
-
-### 5.1 Statuses
+### 6.1 Statuses
 
 | Status | Meaning | Posted | What to do |
 | --- | --- | --- | --- |
-| S | Success: 301 posted, material document filled | yes | Nothing. Check a sample in MB51. |
-| T | Simulation: the line would be posted. Material document shows SIMULATED. | no | Ready for the real run. |
-| Z | Quantity zero in the file | no | Nothing, unless the quantity is wrong. |
-| W | Warning, for example batch value reduced to blank (012) | depends | Read the message; correct the file if the value was a typo. |
-| E | Error: the line was stopped at the first failed check | no | Correct the cause (section 6) and rerun or reprocess. |
-| I | Stock in 8P01 missing from the file, and a valuation segment exists in 8Q01 | no | Add the material/batch to the file, then run a full run. |
-| X | Stock in 8P01 missing from the file, no segment in 8Q01 | no | Confirm it is meant to stay in 8P01; otherwise add it to the file. |
+| S | Posted; material document filled | yes | Nothing; check a sample in MB51. |
+| T | Simulation: would be posted (Mat.Doc = SIMULATED) | no | Ready for the real run. |
+| R | Online: ready to post | not yet | Tick and Post. |
+| Z | Zero quantity, no movement | no | Nothing, unless the quantity is wrong. |
+| W | Warning: run information (054, 056), last movement failed (types 2 / 3), project stock line skipped, QI held by inspection lots (055) | depends | Read the message. |
+| E | Error: stopped at the first failed check | no | Fix the cause (section 7), then reprocess or Post again. |
+| X | Not processed: stock not in the file with nothing to move (011), file line not in 8P01 with "Only file items" (061) | no | Review; nothing to do if expected. |
 
-### 5.2 Columns
+A posted line keeps its success message ("Material document …"). Warnings found during preparation (010 added from SAP stock, 057 already transferred, 060 quantity forced) are shown only on rows that were not posted.
+
+### 6.2 Columns
 
 | Column | Content |
 | --- | --- |
-| Status, Message, Msg Type, Msg Class, Msg No | Result of the line and the message that explains it |
-| Material, Batch, BatchMgd, Val.Type | The file line; BatchMgd = X for a batch-managed material |
-| Src Plant, Src SLoc | Issuing plant and storage location, where the stock currently is (from SAP stock). A line rejected before the allocation (002 to 005) shows one row per storage location holding stock |
-| Dst Plant, Dst SLoc | Receiving plant and storage location, where the stock will be moved (from ZPTP_SLOC_MAP; on a 023 error the missing target; blank when the source location has no mapping or the line has no stock) |
-| Qty Posted, UoM | Quantity of this item, in the base unit |
-| File Qty, SAP Stock, File Variance | File total, stock in 8P01 of the type moved and the difference (file − SAP), per material and batch |
-| SAP Variance | Stock of the type moved in 8P01 (read at the start of the run) minus the quantity the run transfers for the material and batch: the file quantities, the forced quantities ("Force qty to source stock"), or the whole stock (option 2, project stock); lines rejected by a check are not counted. Known before posting. 0 = the run takes the whole stock; positive = stock left in 8P01. Shown in a green cell when 0 or more (the stock covers the transfer), in a red cell when negative, with a warning at the end of the Message ("[WARNING: SAP variance …]"): the file asks for more than the stock in 8P01; check the material in MMBE and the file. List only, not stored in the log table |
-| Mat.Doc, Year | 301 material document, or SIMULATED |
-| RUN_ID, Seq, Mode, Simulation | Run identification: sequence, FULL or DIRECT mode, X for a simulation |
-| Batch normalised | X when the batch value of the file was reduced to blank (see message 012) |
+| Line | Online only: number of the line, the list stays in file order |
+| RUN_ID, Seq, Mode, Simulation | Run identification |
+| Status, Msg Type, Msg No, Message | Result and explanation (the message class is hidden; show it with the layout button) |
+| Material, Batch, Val.Type, WBS element | The line (WBS element for project stock only). Batch = the batch as it exists in SAP |
+| File batch, Punct. swapped | The batch as written in the file, and X when it was found only with "," and "." swapped |
+| BatchMgd | X on every row of a batch-managed material |
+| Src Plant, Src SLoc / Dst Plant, Dst SLoc | Where the stock is in 8P01 / where it goes in 8Q01 (from ZPTP_SLOC_MAP) |
+| Qty Posted, UoM | Quantity of this row: the part of the line issued from that storage location. On a failed row, the quantity attempted; on a ready row, the quantity that would be posted |
+| File Qty | Quantity of the file line (before forcing) |
+| SAP Stock | Stock of the type moved in 8P01 for the material + batch, all storage locations, at the start of the run |
+| File Variance | File total − SAP Stock for the material + batch (the quantity check); 0 when the check does not run |
+| SAP Variance | SAP stock − quantity the run transfers for the material + batch (file, forced or whole-stock quantities; rejected lines excluded). 0 = the run takes the whole stock; positive = stock that stays in 8P01; negative = more to transfer than the stock: red cell and a warning at the end of the message, check MMBE and the file. Green cell when 0 or more. List only |
+| Mvt type, Mat.Doc, Year | Movement (301, 343, 344, 321, 322) and its document |
+| Batch normalised | X when the batch value of the file was reduced to blank (012) |
 
-The rows are grouped by status: T and S first, then E, W, Z, I and X, with a separator line between statuses. Inside a status they are sorted by message, material and batch. Colours: the rows alternate between two light colours (white and light blue) each time the material changes, so the rows of one material read as a block. Rows with a result are coloured whole, over the material colour: red = message type E, A or I; yellow = W; green = simulated or posted (T, S). The material colour shows on the rows without a result colour (ready to post in online mode). The text colour follows the SAP GUI theme.
+### 6.3 Order and colours
 
-Units: a unit with μ (micro) or ρ in the file is recognised whether μ is the micro sign or the Greek mu. If a unit is still refused (message 017), the file is probably not saved in UTF-8: save it again as UTF-8.
+- Background: grouped by status (T, S, E, W, Z, X, R), separator line between statuses, then by message, material and batch. Online: file order.
+- Whole row red = error, green = posted or simulated, yellow = warning. Rows without a result (ready rows in Online) alternate white / light blue at each change of material.
+- Useful ALV functions: filter on Status, sort by Msg No, subtotal Qty Posted per material, export to a spreadsheet for the business review.
 
-Useful ALV functions: filter on Status, sort by Msg No, subtotal Qty Posted by material, and export to a spreadsheet (List > Export) for the business review.
+## 7. Messages and how to fix them
 
-### 5.3 Logs to keep
-
-| Table | One row per | Key |
-| --- | --- | --- |
-| ZPTP_MOV_EXEC | Processed line and issuing storage location | RUN_ID, RUN_SEQ, POSNR |
-| ZPTP_BATCH_EXT | Batch handled in 8Q01: created, already there, simulated or failed | RUN_ID, RUN_SEQ, MATNR, CHARG, WERKS_DST |
-
-Each material document is committed together with its log rows, so every posted document has a log row. If a row reports that some log rows were not written (duplicate key), tell the development team.
-
-## 6. Messages and how to fix them
-
-Every blocked line carries a message of class ZPTP_SPLIT_VAL, or the message of the SAP BAPI that refused it. A line stops at its first failed check, so a fixed line can show a new message on the next simulation.
-
-### 6.1 Messages on the selection screen
+### 7.1 On the selection screen
 
 | Message | Fix |
 | --- | --- |
-| Source/Target plant ... does not exist (T001W) | Correct the plant code. |
-| Source and target plant must be different | Enter 8P01 as source and 8Q01 as target. |
-| Posting date is required | Fill Posting date. |
-| Storage location ... does not exist in plant ... (T001L) | Clear Receiving SLoc; it is not needed. |
-| No storage location mapping from plant ... to plant ... in table ZPTP_SLOC_MAP | Fill ZPTP_SLOC_MAP (SM30) for this plant pair, or check the plants. |
-| A field separator is required | Enter the separator used in the file (`;`). |
-| Please specify the input file path | Fill Input file path. |
-| Input file not found or not readable on the application server | Check the path and its case in AL11, and that you have read access. |
-| Local input file not found | Check the path on your PC, or use F4. |
-| Reprocess-errors requires an existing RUN_ID / RUN_ID ... does not exist in ZPTP_MOV_EXEC | Enter the RUN_ID of the run to reprocess, exactly as in the log. |
+| Source / Target plant … does not exist (T001W) | Correct the plant. |
+| Source and target plant must be different | Enter 8P01 → 8Q01. |
+| Posting date is required | Fill the posting date. |
+| No storage location mapping from plant … to plant … in table ZPTP_SLOC_MAP | Fill ZPTP_SLOC_MAP (SM30) for this plant pair. |
+| A field separator is required | Enter the separator (`;`). |
+| Please specify the input file path | Fill the file path (not needed for project stock). |
+| Input file not found or not readable on the application server | Check the path and its case in AL11, and your access. |
+| Local input file not found | Check the path, or use F4. |
+| File name … does not match the stock type | Use the file extracted for this stock type, or choose the right stock type; tick "Deactivate file name check" only if you are sure. |
+| A background job needs the file on the application server | Copy the file with ZPTP_SPLIT_VAL_UPLD and choose Application server. |
+| Online mode runs in dialog | Untick "Run as background job", or choose Background. |
+| The maximum number of materials cannot be negative | Enter 0 (no limit) or a positive number. |
+| Delete all logs cannot be combined with Reprocess errors | Untick one of them. |
+| Reprocess-errors requires an existing RUN_ID / RUN_ID … does not exist | Enter the RUN_ID exactly as in the log. |
 | RUN_ID is required for the delete/maintenance option | Enter the RUN_ID to delete. |
-| No usable line in the input file | Every line was rejected. Check the separator, the column order and the encoding; the rejected lines are in the log. |
-| No error lines to reprocess for this RUN_ID | The previous sequence has no E line; nothing to do. |
+| No usable line in the input file | Every line was rejected: check separator, column order and encoding; the rejected lines are in the log. |
+| No error lines to reprocess for this RUN_ID | Nothing to do. |
 
-### 6.2 Messages on the result lines
+### 7.2 On the result rows
 
 | No. | Status | Meaning | How to fix |
 | --- | --- | --- | --- |
 | 002 | Z | Zero quantity, no movement | Nothing, unless the quantity is wrong. |
-| 003 | E | Valuation type missing in 8Q01 | Create the valuation segment for that type in 8Q01 (MM02, accounting view), or correct BWTAR in the file. |
-| 004 | E | File quantity differs from SAP stock (of the selected stock scope; can be deactivated with P_NOQTY) | Compare File Qty, SAP Stock and File Variance. Correct the file so that the total per material + batch equals the unrestricted stock in 8P01 (MMBE). Stock may have moved since the extract. |
-| 005 | E | Not enough stock left in the issuing storage locations | Other lines of the same material/batch used the stock first. Check the quantities per valuation type in the file. |
-| 006 | E | No unrestricted stock in 8P01 | Check MMBE: stock may be blocked, in QI, or already moved. A blank batch on a batch-managed material also gives 006: fill the batch. |
-| 007 | E | Quantity not numeric | Correct the quantity (no thousands separator, no text). |
-| 008 | E | Negative quantity | Correct the quantity. |
-| 009 | E | Layout error: fewer than 5 columns, material or valuation type blank, or invalid material number | Correct the line and check the separator. |
-| 010 | I | Stock in 8P01 not in the file, segment exists in 8Q01 | Add the material/batch to the file with its valuation type, then run a full run. |
-| 011 | X | Stock in 8P01 not in the file, no segment in 8Q01 | Confirm with the business that it stays in 8P01, or add it. |
-| 012 | W | Batch column reduced to blank | Expected for placeholders (N/A, NONE, -). Use NO_BATCH or a blank instead. |
-| 013 | E | Material declared NO_BATCH but batch-managed in 8P01 or 8Q01 | Put the real batch numbers in the file, or correct the batch indicator of the material. |
-| 014 | E | Material not extended to one of the plants | Extend the material to 8P01 or 8Q01 (MM01/MM02). |
-| 015 | E | Declared NO_BATCH but batch stock exists in 8P01 | Use the batch numbers from MMBE in the file. |
-| 016 | E | Same batch with several valuation types | One batch, one valuation type: correct the file, or agree new batch numbers with the business. |
-| 017 | E | Unknown unit of measure | Use a valid unit (CUNIT), or leave the unit blank to take the base unit. |
-| 018 | E | Unit differs from the base unit | Convert the quantity into the base unit and use that unit, or leave the unit blank. |
-| 019 | E | Batch already exists in 8Q01 with another valuation type | Check the batch in MSC3N; correct the file or the batch. |
-| 020 | E | Source batch cannot be read in 8P01 | Check the batch in MSC3N for 8P01. |
-| 022 | E | Update failed after commit, document not posted | Check SM13 for the failed update, correct, then reprocess. |
-| 023 | E | Mapped target storage location missing in 8Q01 | Correct the target storage location in ZPTP_SLOC_MAP, or create it in 8Q01 (OX09, MM customizing team). |
-| 025 | E | Option 2: material split-valuated in 8Q01 | Include the material in the input file with its valuation type and run option 1, or correct the material master. |
-| 026 | E | Option 2: batch management differs between 8P01 and 8Q01 | Align the batch management indicator in both plants, then reprocess. |
-| 054 | W | Run parameters (first row of every run) | Nothing: it records the options used (transfer mode, stock checked, quantity check and file name check on or off, quantity forced or from file). |
-| 060 | W | Quantity forced to the stock of the source plant (file quantity shown in brackets) | Nothing: expected with "Force qty to source stock". Check the difference with the file if it is large. |
-| 061 | X | File line not in 8P01 (material not extended or batch missing), with "Only file items in src plant" | Nothing, if expected. Otherwise check the material (MM03) and the batch (MSC3N) in 8P01. |
-| 055 | W | Mode 3: QI stock held by open inspection lots stays in 8P01 | Nothing, unless that stock must move too: close the inspection lots (usage decision, QA11) and run again. |
-| 024 | E | No entry in ZPTP_SLOC_MAP for the issuing storage location (shown in Src SLoc) | Add the entry 8P01 / storage location / 8Q01 / target storage location with SM30, then reprocess. |
-| other | E | Message from BAPI_GOODSMVT_CREATE or BAPI_BATCH_CREATE (for example M7, 12) | Read Msg Class and Msg No in SE91; typical causes are a closed period, a locked material or a missing authorization. |
+| 003 | E | Valuation type missing in 8Q01 | Create the valuation segment in 8Q01 (MM02, accounting view) or correct BWTAR in the file. |
+| 004 | E | File quantity differs from SAP stock | Compare File Qty, SAP Stock, File Variance; correct the file, or use "Force qty to source stock" / "Deactivate qty check". |
+| 005 | E | Not enough stock left in the storage locations | Other lines of the same batch used the stock first; check the quantities in the file. |
+| 006 | E | No stock of the type moved in 8P01 | Check MMBE: the stock may be of another type or already moved. A blank batch on a batch-managed material also gives 006. |
+| 007 / 008 | E | Quantity not numeric / negative | Correct the quantity. |
+| 009 | E | Layout error, mandatory field blank, invalid material | Correct the line and the separator. |
+| 010 | W / E | Batch not in the file, added with the SAP stock (posted). E: split-valuated in 8Q01 and no valuation type found | E: add the batch to the file with its valuation type. W: nothing, if the business agrees; otherwise use "Only file items in src plant". |
+| 011 | X | Stock not in the file, nothing of the type moved | Nothing. |
+| 012 | W | Batch column reduced to blank (placeholder value) | Use NO_BATCH or a blank. |
+| 013 | E | NO_BATCH on a batch-managed material | Put the real batch numbers in the file. |
+| 014 | E | Material not extended to one of the plants | Extend the material (MM01 / MM02). |
+| 015 | E | NO_BATCH but batch stock exists in 8P01 | Use the batch numbers from MMBE. |
+| 016 | E | Same batch with several valuation types | One batch, one valuation type: correct the file. |
+| 017 / 018 | E | Unknown unit / unit differs from the base unit | Use the base unit, or leave the unit blank; save the file as UTF-8. |
+| 019 | E | Batch exists in 8Q01 with another valuation type | Check the batch in MSC3N; correct the file or the batch. |
+| 020 | E | Source batch cannot be read in 8P01 | Check the batch in MSC3N. |
+| 022 | E | Update failed after commit, document not posted | Check SM13, fix, reprocess. |
+| 023 | E | Mapped target storage location missing in 8Q01 | Correct ZPTP_SLOC_MAP or create the storage location in 8Q01. |
+| 024 | E | No ZPTP_SLOC_MAP entry for the storage location (Src SLoc) | Add the entry in SM30, then reprocess. |
+| 025 | E | Option 2: material split-valuated in 8Q01 | Put the material in the file and use option 1. |
+| 026 | E / W | Batch management differs between 8P01 and 8Q01 | Align the batch management indicator. |
+| 054 | W | Run parameters (first row of every run) | Nothing: records the options used. |
+| 055 | W | QI stock held by inspection lots stays in 8P01 | Close the lots (QA11) if that stock must move, then run again. |
+| 056 | W | Max. materials: processed and left | Run again with the same RUN_ID for the next materials. |
+| 057 | W | Batch already transferred in an earlier run | Check that it is not a duplicate before posting. |
+| 058 | W | Project stock: no ZPTP_301_VALTYPE entry | Maintain ZPTP_301_VALTYPE for the plant / material type and fiscal year. |
+| 059 | — | Project stock: valuation type set on the batch in 8Q01 | Nothing (in ZPTP_BATCH_EXT). |
+| 060 | W | Quantity forced to the stock of 8P01 | Nothing: expected with "Force qty"; check large differences. |
+| 062 | E | Batch with "," or "." not found, neither as written nor with the punctuation swapped (both values shown) | Check the batch in MSC3N and correct the file. |
+| 063 | W | Both forms of a batch with "," or "." exist (e.g. 24.105 and 24,105); the one as written was used | Check with the business whether one of them is a duplicate. |
+| 061 | X | File line not in 8P01 (material not extended or batch missing) | Nothing if expected; otherwise check MM03 / MSC3N, and the batch number (leading zeros). |
+| other | E | Message of BAPI_GOODSMVT_CREATE / BAPI_BATCH_CREATE (e.g. M7) | Read it in SE91: closed period, locked material, missing storage location data, authorization. |
 
-### 6.3 Other problems
+### 7.3 Other problems
 
 | Symptom | Cause and fix |
 | --- | --- |
-| Every unit is rejected (017) | The file was uploaded in binary mode: a carriage return ends up in the unit. Upload it again in text mode. |
-| First data line is missing from the result | The file has no header and its first quantity is not numeric, so line 1 was taken as a header. Add a header line. |
-| Local file run fails in background | Local file needs SAP GUI. Use Application server. |
-| Dialog run stops with a time-out | Run it in background (section 4, step 6). |
-| Many materials end in 006 although stock exists | Check the material-type and batch filters, and that the stock is unrestricted, not in QI or blocked. |
+| Every unit rejected (017) | File uploaded in binary mode: upload it again in text mode. |
+| First data line missing | No header and the first quantity is not numeric: add a header line. |
+| Local file run fails in background | Use Application server. |
+| Dialog run stops with a time-out | Use "Run as background job", or "Max. materials per run". |
+| Simulation checkbox not visible | Online mode is selected: Simulation does not apply there. |
+| A simulation run cannot be found in ZPTP_MOV_EXEC | "Simulation without log" was ticked (default): the result was only in the list. Untick it to log simulations. |
+| Many lines in 006 although stock exists | Wrong stock type, or filters (material type, batch) too narrow. |
 
-## 7. After the real run
+## 8. After the real run
 
-The migration is complete when 8P01 holds no unrestricted stock that was meant to move and every S line is found in 8Q01 with the right valuation type.
+### 8.1 Checks
 
-### 7.1 Checks
+- [ ] No line left in status E for the RUN_ID of the real run.
+- [ ] SAP Variance 0 for every migrated material + batch, or the remaining stock explained.
+- [ ] Stock of the migrated type in 8P01 is zero for the migrated materials (MMBE / MB52).
+- [ ] Stock in 8Q01 per material, batch, valuation type and storage location matches the file (MB52).
+- [ ] The documents of the run are in MB51 (one 301 per S line; 343/344 or 321/322 for types 2 and 3).
+- [ ] Batches created in 8Q01 have the valuation type and dates of the source batch (MSC3N, ZPTP_BATCH_EXT).
+- [ ] Stock values per valuation type in 8Q01 agreed with Finance.
+- [ ] W and X lines reviewed and signed off.
 
-- [ ] No line left in status E for the RUN_ID of the real run (SE16 on ZPTP_MOV_EXEC, last sequence).
-- [ ] Unrestricted stock in 8P01 is zero for the migrated materials (MMBE or MB52).
-- [ ] Stock in 8Q01 matches the file, per material, batch, valuation type and storage location (MMBE, MB52).
-- [ ] The 301 documents of the run are in MB51 (movement type 301, plant 8P01, posting date of the run), one per S line.
-- [ ] Batches created in 8Q01 have the valuation type and dates of the source batch (MSC3N; ZPTP_BATCH_EXT for the list).
-- [ ] Stock values in 8Q01 per valuation type look right (MB5L or the valuation report agreed with Finance).
-- [ ] Lines in status I and X have been reviewed and signed off by the business.
+### 8.2 Good practice
 
-### 7.2 Good practice
-
-- Never run the real posting before a clean simulation on the same file and the same day.
-- Keep the input file of every real run, together with its RUN_ID.
-- Run the final migration without material, batch or material-type filters, so the "stock missing from the file" check covers the whole plant.
-- Use Direct transfer only for materials agreed in advance; it skips the quantity check.
-- Do not delete a run that has postings: the program refuses it, because ZPTP_MOV_EXEC is the audit trail.
-- Batch classification is not copied; if the business needs it in 8Q01, plan it as a separate step.
-- If you need to reverse a posting, cancel the 301 document in MIGO or MBST, then correct and rerun that line.
+- Never post before a clean simulation of the same file, the same day.
+- Keep the input file of every real run with its RUN_ID.
+- Run the final migration without filters.
+- Use Direct transfer, "Deactivate qty check" and "Force qty" only when agreed.
+- Never delete a run with postings: ZPTP_MOV_EXEC is the audit trail.
+- To reverse a posting, cancel the document in MIGO / MBST, then correct and post the line again.
+- Batch classification is not copied: plan it separately if needed.

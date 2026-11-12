@@ -3,7 +3,7 @@
 *&---------------------------------------------------------------------*
 *& Project : HBM - Split Valuation migration
 *& Scope   : Clearing of batch stocks / Inter-plant transfer
-*& Version : v1.33
+*& Version : v1.35
 *& Package : ZPTP_SPLIT_VAL        Message class: ZPTP_SPLIT_VAL
 *&
 *&---------------------------------------------------------------------*
@@ -157,6 +157,18 @@
 *&   neither exists the normalised batch is kept. Non-numeric batches
 *&   are compared as written (upper case). F_RESOLVE_BATCH.
 *&
+*& Batch with "," or "." (v1.35): a file batch holding a comma or a full
+*&   stop is looked up in the source plant (MCHA: material + plant +
+*&   batch) as written first; when it does not exist, with every "," and
+*&   "." swapped (24.105 -> 24,105). The original wins when both exist,
+*&   with a W row (ZPTP_SPLIT_VAL 063, possible duplicate batches). A
+*&   match by the swapped value is used for every later step and logged:
+*&   CHARG = SAP batch, CHARG_FILE = batch of the file, PUNCT_SUB = 'X'
+*&   (ZPTP_MOV_EXEC, ALV columns File batch / Punct. swapped). Neither
+*&   exists: the line fails (ZPTP_SPLIT_VAL 062, both values in the
+*&   message). Other batches: leading-zero rule of v1.10 unchanged. The
+*&   file itself is never changed. F_RESOLVE_BATCH.
+*&
 *& File name check (v1.11): the name of the input file (path excluded,
 *&   case-insensitive) must match the stock type transferred:
 *&     1 unrestricted -> contains UNRESTRICTED;
@@ -192,7 +204,11 @@
 *& Execution mode (v1.13; v1.15: own block B8, first on the screen,
 *&   Online above Background; v1.25: P_JOB moved to B8, below them;
 *&   v1.26: P_TEST moved to B8, last; v1.29: P_TEST hidden and ignored
-*&   in Online mode, which always posts for real after its confirmation):
+*&   in Online mode, which always posts for real after its confirmation;
+*&   v1.34: P_NOLOG "Simulation without log", ticked by default, below
+*&   P_TEST: a simulation writes nothing to ZPTP_MOV_EXEC / ZPTP_BATCH_EXT,
+*&   the result is in the ALV (spool in a job) only; no sequence is used.
+*&   Input only with P_TEST ticked, hidden in Online mode):
 *&   - Background (P_BGD, default): every line is processed in one run,
 *&     exactly as before (in dialog, or as a job with P_JOB).
 *&   - Online (P_ONL, dialog only): the file is read and checked as in
@@ -384,6 +400,8 @@ TYPES: BEGIN OF gty_input_raw,
          warnno TYPE symsgno,    " message number of the warning [v1.8]
          pspnr TYPE ps_psp_pnr,  " WBS element, project stock (mode 4) [v1.9]
          frc   TYPE abap_bool,   " quantity forced from the source plant [v1.12]
+         charg_file TYPE charg_d, " batch as in the file, before matching [v1.35]
+         punct TYPE abap_bool,   " matched with "," / "." swapped [v1.35]
          mfile TYPE menge_d,     " quantity of the file before forcing [v1.12]
        END OF gty_input_raw.
 TYPES: gtt_input_raw TYPE STANDARD TABLE OF gty_input_raw WITH DEFAULT KEY.
@@ -518,6 +536,8 @@ TYPES: BEGIN OF gty_out,
          autono     TYPE symsgno,     " its message number [v1.8]
          posid      TYPE ps_posid,    " WBS element, project stock (mode 4), ALV only [v1.9]
          line_id    TYPE i,           " input line (GT_INPUT_RAW index), 0 = run row, ALV only [v1.13]
+         charg_file TYPE charg_d,     " batch as in the file (ZPTP_MOV_EXEC-CHARG_FILE) [v1.35]
+         punct_sub  TYPE abap_bool,   " "," / "." swapped to match (ZPTP_MOV_EXEC-PUNCT_SUB) [v1.35]
          sel        TYPE c LENGTH 1,  " selection box of the online ALV [v1.13]
          sort_key   TYPE c LENGTH 1,  " display order of the status, ALV only
          rowcolor   TYPE c LENGTH 4,  " ALV row colour: material band, ALV only [v1.18]
@@ -568,6 +588,10 @@ CLASS lcl_help DEFINITION.
 *   Numeric batch without its leading zeros; a batch of zeros only or
 *   a non-numeric value unchanged                            [v1.10]
     CLASS-METHODS strip_batch
+      IMPORTING iv_charg TYPE charg_d
+      RETURNING VALUE(rv_charg) TYPE charg_d.
+*   Batch with every "," replaced by "." and every "." by ","  [v1.35]
+    CLASS-METHODS swap_punct
       IMPORTING iv_charg TYPE charg_d
       RETURNING VALUE(rv_charg) TYPE charg_d.
 *   Buffers the valuation segments of one valuation area   [v0.3-25]
@@ -719,6 +743,13 @@ CLASS lcl_help IMPLEMENTATION.
     OVERLAY rv_charg WITH '0000000000'.
   ENDMETHOD.
 
+  METHOD swap_punct.                                            " [v1.35]
+*   TRANSLATE ... USING ',..,': each "," becomes "." and each "." becomes
+*   "," in one pass (the pairs are applied per character)
+    rv_charg = iv_charg.
+    TRANSLATE rv_charg USING ',..,'.
+  ENDMETHOD.
+
   METHOD strip_batch.                                           " [v1.10]
     rv_charg = iv_charg.
     CONDENSE rv_charg NO-GAPS.
@@ -850,7 +881,9 @@ SELECTION-SCREEN BEGIN OF BLOCK b8 WITH FRAME TITLE TEXT-b08.
                       USER-COMMAND exm,                          " refreshes the screen (P_TEST) [v1.29]
               p_bgd   RADIOBUTTON GROUP exm DEFAULT 'X'.         " background: all lines, as before
   PARAMETERS: p_job   TYPE abap_bool AS CHECKBOX.                " run as a background job [v1.5, moved v1.25]
-  PARAMETERS: p_test  TYPE abap_bool DEFAULT 'X' AS CHECKBOX.    " TESTRUN (simulation) [v1.1, moved v1.26]
+  PARAMETERS: p_test  TYPE abap_bool DEFAULT 'X' AS CHECKBOX     " TESTRUN (simulation) [v1.1, moved v1.26]
+                      USER-COMMAND tst.                          " refreshes the screen (P_NOLOG) [v1.34]
+  PARAMETERS: p_nolog TYPE abap_bool DEFAULT 'X' AS CHECKBOX.    " simulation without log [v1.34]
 SELECTION-SCREEN END OF BLOCK b8.
 
 * run control                                               [v1.1]
@@ -926,6 +959,19 @@ AT SELECTION-SCREEN ON VALUE-REQUEST FOR s_stat-high.
 *&---------------------------------------------------------------------*
 AT SELECTION-SCREEN OUTPUT.
   LOOP AT SCREEN.
+*   simulation without log: hidden in Online mode, input only with
+*   Simulation ticked                                          [v1.34]
+    IF screen-name CS 'P_NOLOG'.
+      IF p_onl = abap_true.
+        screen-active = '0'.
+      ELSE.
+        screen-active = '1'.
+        IF p_test = abap_false AND screen-name = 'P_NOLOG'.
+          screen-input = '0'.
+        ENDIF.
+      ENDIF.
+      MODIFY SCREEN.
+    ENDIF.
     IF screen-name CS 'P_TEST'.
 *     SCREEN-ACTIVE is character-like: '0' / '1' as text literals. An
 *     integer 1 converted to a 1-character field gives '*' (no room
@@ -1727,7 +1773,10 @@ FORM f_init.
   WRITE: / 'Transfer:', p_wsrc, '->', p_wdst, '(storage locations mapped by ZPTP_SLOC_MAP)',
            'Posting date:', p_budat.
   IF p_test = abap_true.
-    WRITE: / '*** SIMULATION (TESTRUN) - no posting ***' COLOR COL_TOTAL.
+    WRITE: / '*** SIMULATION (TESTRUN) - no posting ***' COLOR COL_TOTAL,
+             COND string( WHEN p_nolog = abap_true                         " [v1.34]
+                          THEN '- NO LOG: result in this list only, nothing written to ZPTP_MOV_EXEC'
+                          ELSE '' ).
   ENDIF.
   SKIP.
 
@@ -1775,6 +1824,8 @@ FORM f_log_run_params.
                                                THEN |forced to stock of { p_wsrc }|
                                                ELSE 'from file' ) }| &&                    " [v1.12]
                    |, { COND string( WHEN gv_run_mode = gc_mode_dir THEN 'DIRECT' ELSE 'FULL' ) }| &&
+                   |, log: { COND string( WHEN p_test = abap_true AND p_nolog = abap_true
+                                          THEN 'OFF (simulation without log)' ELSE 'ON' ) }| &&   " [v1.34]
                    |, zero-stock batches: { COND string( WHEN p_zbat = abap_true
                                                          THEN 'YES' ELSE 'NO' ) }| &&
                    |{ COND string( WHEN p_reprc = abap_true THEN ', reprocess errors only' ) }| &&
@@ -2436,8 +2487,11 @@ FORM f_validate_no_batch.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*&      Form  F_RESOLVE_BATCH                                   [v1.10]
-*&      Batch number of the file matched against the batches of the
+*&      Form  F_RESOLVE_BATCH                            [v1.10, v1.35]
+*&      Batch with "," or "." (v1.35): as written, else with the
+*&      punctuation swapped (PUNCT = X, CHARG_FILE keeps the file value),
+*&      else the line fails (062); both exist: original used, W row 063.
+*&      Other batches: matched against the batches of the
 *&      source plant (MCHA), before the aggregation since it changes the
 *&      Material + Batch key:
 *&        1. the batch normalised with leading zeros (0000000123);
@@ -2455,11 +2509,22 @@ FORM f_resolve_batch.
          END OF lty_key.
   DATA: lt_key   TYPE STANDARD TABLE OF lty_key WITH DEFAULT KEY,
         lt_mcha  TYPE SORTED TABLE OF lty_key WITH UNIQUE KEY matnr charg,
+        ls_out   TYPE gty_out,
         lv_norm  TYPE charg_d,
-        lv_strip TYPE charg_d.
+        lv_strip TYPE charg_d,
+        lv_alt   TYPE charg_d,
+        lv_orig  TYPE abap_bool,
+        lv_altok TYPE abap_bool.
 
-* candidates of every line: normalised and without leading zeros
-  LOOP AT gt_input_raw INTO DATA(ls_raw) WHERE charg IS NOT INITIAL.
+* candidates of every line: batch with "," or "." as written and with
+* the punctuation swapped [v1.35]; other batches normalised and
+* without leading zeros [v1.10]
+  LOOP AT gt_input_raw INTO DATA(ls_raw) WHERE charg IS NOT INITIAL AND bad = abap_false.
+    IF ls_raw-charg CA ',.'.
+      APPEND VALUE #( matnr = ls_raw-matnr charg = ls_raw-charg ) TO lt_key.
+      APPEND VALUE #( matnr = ls_raw-matnr charg = lcl_help=>swap_punct( ls_raw-charg ) ) TO lt_key.
+      CONTINUE.
+    ENDIF.
     lv_norm  = lcl_help=>norm_batch( ls_raw-charg ).
     lv_strip = lcl_help=>strip_batch( ls_raw-charg ).
     APPEND VALUE #( matnr = ls_raw-matnr charg = lv_norm ) TO lt_key.
@@ -2473,6 +2538,7 @@ FORM f_resolve_batch.
   SORT lt_key BY matnr charg.
   DELETE ADJACENT DUPLICATES FROM lt_key COMPARING matnr charg.
 
+* batches of the source plant: material + plant + batch
   SELECT matnr, charg FROM mcha
     FOR ALL ENTRIES IN @lt_key
     WHERE matnr = @lt_key-matnr
@@ -2480,7 +2546,51 @@ FORM f_resolve_batch.
       AND charg = @lt_key-charg
     INTO CORRESPONDING FIELDS OF TABLE @lt_mcha.
 
-  LOOP AT gt_input_raw ASSIGNING FIELD-SYMBOL(<ls_raw>) WHERE charg IS NOT INITIAL.
+  LOOP AT gt_input_raw ASSIGNING FIELD-SYMBOL(<ls_raw>) WHERE charg IS NOT INITIAL AND bad = abap_false.
+*   batch of the file, kept for the log; the file is never changed
+    <ls_raw>-charg_file = <ls_raw>-charg.
+
+*   --- batch with "," or "." -------------------------------- [v1.35]
+    IF <ls_raw>-charg CA ',.'.
+      lv_alt = lcl_help=>swap_punct( <ls_raw>-charg ).
+      READ TABLE lt_mcha TRANSPORTING NO FIELDS
+           WITH TABLE KEY matnr = <ls_raw>-matnr charg = <ls_raw>-charg.
+      lv_orig = xsdbool( sy-subrc = 0 ).
+      READ TABLE lt_mcha TRANSPORTING NO FIELDS
+           WITH TABLE KEY matnr = <ls_raw>-matnr charg = lv_alt.
+      lv_altok = xsdbool( sy-subrc = 0 ).
+      IF lv_orig = abap_true.
+*       the original wins; both exist: possible duplicate batches
+        IF lv_altok = abap_true.
+          CLEAR ls_out.
+          ls_out-matnr      = <ls_raw>-matnr.
+          ls_out-charg      = <ls_raw>-charg.
+          ls_out-charg_file = <ls_raw>-charg_file.
+          ls_out-bwtar      = <ls_raw>-bwtar.
+          ls_out-status     = gc_st_warn.
+          ls_out-message    = |Batches { <ls_raw>-charg } and { lv_alt } both exist for material | &&
+                              |{ <ls_raw>-matnr ALPHA = OUT } in plant { p_wsrc } - { <ls_raw>-charg } | &&
+                              |(as in the file) used; check for duplicate batches|.
+          PERFORM f_add_log USING gc_msgid '063' 'W' CHANGING ls_out.
+        ENDIF.
+      ELSEIF lv_altok = abap_true.
+*       found with the punctuation swapped: the SAP batch is used
+        <ls_raw>-charg = lv_alt.
+        <ls_raw>-punct = abap_true.
+      ELSE.
+*       neither exists: the line fails
+        <ls_raw>-bad   = abap_true.
+        <ls_raw>-badno = '062'.
+        <ls_raw>-badtx = |Batch not found: { <ls_raw>-charg } (as in the file) and { lv_alt } | &&
+                         |(punctuation swapped) do not exist for material | &&
+                         |{ <ls_raw>-matnr ALPHA = OUT } in plant { p_wsrc }|.
+        INSERT VALUE gty_badkey( matnr = <ls_raw>-matnr charg = <ls_raw>-charg )
+               INTO TABLE gt_badkey.
+      ENDIF.
+      CONTINUE.
+    ENDIF.
+
+*   --- other batches: leading zeros ------------------------- [v1.10]
     lv_norm  = lcl_help=>norm_batch( <ls_raw>-charg ).
     lv_strip = lcl_help=>strip_batch( <ls_raw>-charg ).
     READ TABLE lt_mcha TRANSPORTING NO FIELDS
@@ -3442,6 +3552,8 @@ FORM f_process_line USING is_raw TYPE gty_input_raw.
          lv_avail, lv_aok, lv_found, lv_split, lv_vt, lv_cerr, lv_cmsg, lv_zdone.
   ls_out-matnr     = ls_raw-matnr.
   ls_out-charg     = ls_raw-charg.
+  ls_out-charg_file = ls_raw-charg_file.                        " [v1.35]
+  ls_out-punct_sub = ls_raw-punct.                              " [v1.35]
   ls_out-bwtar     = ls_raw-bwtar.
 *   forced quantity: the file quantity stays visible            [v1.12]
   ls_out-qty_input = COND #( WHEN ls_raw-frc = abap_true THEN ls_raw-mfile
@@ -5036,6 +5148,8 @@ FORM f_add_log USING iv_id  TYPE symsgid
   ls_log-testrun   = p_test.
   ls_log-matnr     = cs_out-matnr.
   ls_log-charg     = cs_out-charg.
+  ls_log-charg_file = cs_out-charg_file.                        " [v1.35]
+  ls_log-punct_sub = cs_out-punct_sub.                          " [v1.35]
   ls_log-xchpf     = cs_out-xchpf.
   ls_log-bwtar     = cs_out-bwtar.
   ls_log-werks_src = p_wsrc.
@@ -5123,6 +5237,13 @@ FORM f_flush_logs CHANGING cv_err TYPE abap_bool
 
   CLEAR: cv_err, cv_msg.
 
+* simulation without log: the rows stay in the ALV list (spool in a
+* job) and are not written                                   [v1.34]
+  IF p_test = abap_true AND p_nolog = abap_true.
+    CLEAR: gt_mov_log, gt_ext_log.
+    RETURN.
+  ENDIF.
+
   IF gt_ext_log IS INITIAL AND gt_mov_log IS INITIAL.
     RETURN.
   ENDIF.
@@ -5204,6 +5325,8 @@ FORM f_display_alv.
   add_col 'STATUS'     'Status'.
   add_col 'MATNR'      'Material'.
   add_col 'CHARG'      'Batch'.
+  add_col 'CHARG_FILE' 'File batch'.                          " [v1.35]
+  add_col 'PUNCT_SUB'  'Punct. swapped'.                      " [v1.35]
   add_col 'XCHPF'      'BatchMgd'.
   add_col 'BWTAR'      'Val.Type'.
   IF gv_xfer = gc_xfer_prj.                                     " [v1.9]
@@ -5419,6 +5542,8 @@ FORM f_online_list.
     ls_out-testrun    = p_test.
     ls_out-matnr      = ls_raw-matnr.
     ls_out-charg      = ls_raw-charg.
+    ls_out-charg_file = ls_raw-charg_file.                      " [v1.35]
+    ls_out-punct_sub  = ls_raw-punct.                           " [v1.35]
     ls_out-bwtar      = ls_raw-bwtar.
     ls_out-werks_src  = p_wsrc.
     ls_out-werks_dst  = p_wdst.
@@ -5861,6 +5986,8 @@ FORM f_keep_file_items.
     CLEAR ls_out.
     ls_out-matnr     = ls_raw-matnr.
     ls_out-charg     = ls_raw-charg.
+    ls_out-charg_file = ls_raw-charg_file.                      " [v1.35]
+    ls_out-punct_sub = ls_raw-punct.                            " [v1.35]
     ls_out-bwtar     = ls_raw-bwtar.
     ls_out-qty_input = ls_raw-menge.
     ls_out-meins     = ls_raw-meins.
