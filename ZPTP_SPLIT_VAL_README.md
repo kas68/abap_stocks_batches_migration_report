@@ -15,6 +15,8 @@ This repository holds the code only; version history is kept in git (the former
 - `ZPTP_SPLIT_VAL_FUNCTIONAL_SPEC.md` — functional specification and user guide (processing,
   selection-screen parameters, input file format, results).
 - `ZPTP_SPLIT_VAL_SPEC_FONCTIONNELLE.md` — the same specification and user guide in French.
+- `ZPTP_SVAL_FILE_RFC.abap` — function group ZPTP_SVAL_FILE: remote-enabled file access on a chosen
+  application server, used by ZPTP_SPLIT_VAL_MIG_UPLOAD (v0.6).
 - `ZPTP_SPLIT_VAL_MIG_UTILITY.abap` — report that builds the input file from SAP data (see
   "Utility report" below).
 - `HIGH_LEVEL_OVERVIEW.md` — non-technical overview of the program.
@@ -95,6 +97,38 @@ This repository holds the code only; version history is kept in git (the former
 - To create in SE41: GUI status **ZMIG_ALV** of program ZPTP_SPLIT_VAL_MIG, copied from program SAPLKKBL,
   status STANDARD_FULLSCREEN, with a new application-toolbar function **POST** (text *Post*, icon
   ICON_POSTING, function type blank). Selection texts `P_BGD` and `P_ONL`.
+
+## ZPTP_SPLIT_VAL_MIG_UPLOAD v0.6 (choice of the application server)
+- New block B9 *Application server*: `P_ASRV` (MSXXLIST-NAME), the instance whose file system is read or
+  written, as named in SM51 (e.g. `hbmapp02_HBM_00`). Default: the current instance (profile parameter
+  `rdisp/myname`, `INITIALIZATION`). F4 `F_F4_ASRV` lists the active instances (`TH_SERVER_LIST`); on
+  execution `F_CHECK_ASRV` refuses an instance that is not active.
+- Every server file access goes through the new remote-enabled function modules of function group
+  **ZPTP_SVAL_FILE** (source in `ZPTP_SVAL_FILE_RFC.abap`): `Z_PTP_SVAL_DIR_PATH` (AL11 name → path, per
+  instance), `Z_PTP_SVAL_DIR_LIST`, `Z_PTP_SVAL_FILE_EXISTS`, `Z_PTP_SVAL_FILE_READ`, `Z_PTP_SVAL_FILE_WRITE`.
+  They are called locally for the current server and with `DESTINATION <instance>` for another one (an
+  instance name of the same system is a valid RFC destination, no SM59 entry). Wrappers `F_SRV_*`,
+  `F_SET_DEST`, `F_DEST_FROM_SCREEN` (the F4 helps read `P_ASRV` from the screen first). RFC failures are
+  reported with the server name.
+- File content now in `SOLIX_TAB` (RFC-compatible) instead of a table of X255.
+- **To create first:** function group ZPTP_SVAL_FILE with the five modules (remote-enabled, parameters by
+  value, interfaces in the source comments), then activate the report. Text symbol `B09` *Application
+  server*, selection text `P_ASRV` *Application server*. Authorization: S_RFC for function group
+  ZPTP_SVAL_FILE (activity 16), S_DATASET on the target server as before.
+
+## ZPTP_SPLIT_VAL_MIG_UPLOAD v0.5 (download from the server)
+- New block B0 *Direction*: `P_UPL` upload PC → server (default, as before) / `P_DNL` download server → PC
+  (`USER-COMMAND dir`; `AT SELECTION-SCREEN OUTPUT` opens only the fields of the chosen direction).
+- New block B2 *Download*: `P_DFILE` file on the server (full path; F4 `F_F4_SERVER_FILE` lists the files
+  of the directory typed: a path, an AL11 directory name, or DIR_HOME), `P_DDIR` folder on the PC (F4
+  `F_F4_PC_FOLDER`, SAP GUI folder dialog), `P_DOVR` replace on the PC without asking.
+- `F_READ_SERVER`: `OPEN DATASET ... FOR INPUT IN BINARY MODE`, `READ DATASET ... ACTUAL LENGTH` into
+  `GT_BIN`. `F_DOWNLOAD`: target = PC folder + name of the server file; confirmation when the file exists
+  on the PC (`FILE_EXIST`) unless `P_DOVR`; `GUI_DOWNLOAD` as BIN with `BIN_FILESIZE`, so the content is
+  unchanged. Dialog only; S_DATASET read access needed.
+- Text symbols `B00` *Direction*, `B02` *Download*; selection texts `P_UPL` *Upload PC -> server*,
+  `P_DNL` *Download server -> PC*, `P_DFILE` *File on the server*, `P_DDIR` *Folder on the PC*, `P_DOVR`
+  *Replace without asking*.
 
 ## ZPTP_SPLIT_VAL_BATCH_COPY v1.8 (list by material)
 - ALV sort: `MATNR` ascending with a separator line (`GROUP = 'UL'`) between two materials, then `CHARG`
