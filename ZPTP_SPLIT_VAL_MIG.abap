@@ -3,7 +3,7 @@
 *&---------------------------------------------------------------------*
 *& Project : HBM - Split Valuation migration
 *& Scope   : Clearing of batch stocks / Inter-plant transfer
-*& Version : v1.36
+*& Version : v1.37
 *& Package : ZPTP_SPLIT_VAL        Message class: ZPTP_SPLIT_VAL
 *&
 *&---------------------------------------------------------------------*
@@ -208,7 +208,8 @@
 *&   v1.34: P_NOLOG "Simulation without log", ticked by default, below
 *&   P_TEST: a simulation writes nothing to ZPTP_MOV_EXEC / ZPTP_BATCH_EXT,
 *&   the result is in the ALV (spool in a job) only; no sequence is used.
-*&   Input only with P_TEST ticked, hidden in Online mode):
+*&   Input only with P_TEST ticked, hidden in Online mode; v1.37: P_TEST
+*&   and P_NOLOG are no longer hidden in Online mode, only display-only):
 *&   - Background (P_BGD, default): every line is processed in one run,
 *&     exactly as before (in dialog, or as a job with P_JOB).
 *&   - Online (P_ONL, dialog only): the file is read and checked as in
@@ -958,29 +959,17 @@ AT SELECTION-SCREEN ON VALUE-REQUEST FOR s_stat-high.
 *&  posts for real                                              [v1.29]
 *&---------------------------------------------------------------------*
 AT SELECTION-SCREEN OUTPUT.
+* Online mode: Simulation and Simulation without log stay visible but
+* are display-only (they do not apply, Online always posts for real).
+* Simulation without log is also display-only when Simulation is not
+* ticked (a real run is always logged).                [v1.29, v1.37]
+* SCREEN-INPUT is character-like: '0' / '1' as text literals   [v1.32]
   LOOP AT SCREEN.
-*   simulation without log: hidden in Online mode, input only with
-*   Simulation ticked                                          [v1.34]
-    IF screen-name CS 'P_NOLOG'.
-      IF p_onl = abap_true.
-        screen-active = '0'.
-      ELSE.
-        screen-active = '1'.
-        IF p_test = abap_false AND screen-name = 'P_NOLOG'.
-          screen-input = '0'.
-        ENDIF.
-      ENDIF.
+    IF screen-name = 'P_TEST'.
+      screen-input = COND #( WHEN p_onl = abap_true THEN '0' ELSE '1' ).
       MODIFY SCREEN.
-    ENDIF.
-    IF screen-name CS 'P_TEST'.
-*     SCREEN-ACTIVE is character-like: '0' / '1' as text literals. An
-*     integer 1 converted to a 1-character field gives '*' (no room
-*     for the sign position) and hid the field in every mode   [v1.32]
-      IF p_onl = abap_true.
-        screen-active = '0'.
-      ELSE.
-        screen-active = '1'.
-      ENDIF.
+    ELSEIF screen-name = 'P_NOLOG'.
+      screen-input = COND #( WHEN p_onl = abap_true OR p_test = abap_false THEN '0' ELSE '1' ).
       MODIFY SCREEN.
     ENDIF.
   ENDLOOP.

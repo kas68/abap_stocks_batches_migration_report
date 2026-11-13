@@ -96,6 +96,59 @@ This repository holds the code only; version history is kept in git (the former
   status STANDARD_FULLSCREEN, with a new application-toolbar function **POST** (text *Post*, icon
   ICON_POSTING, function type blank). Selection texts `P_BGD` and `P_ONL`.
 
+## ZPTP_SPLIT_VAL_BATCH_COPY v1.8 (list by material)
+- ALV sort: `MATNR` ascending with a separator line (`GROUP = 'UL'`) between two materials, then `CHARG`
+  ascending; the status grouping (`SORT_KEY`, `STATTX`) is no longer used for the sort (`STATTX` stays as
+  a column). `F_ALV_BANDS` sorts `GT_OUT` the same way, so the material bands follow the list.
+- Column *In file* moved after *Batch*.
+
+## ZPTP_SPLIT_VAL_BATCH_COPY v1.7 (posting result in strong colours)
+- New field `GTY_OUT-POSTED`, set when `F_COPY_BATCH` runs for the row (Post button online, or the
+  background run). `F_SET_COLOR` then colours the whole row strong green `C511` when the batch was created
+  (S) and strong red `C611` when the creation failed (E), the codes of ZPTP_SPLIT_VAL_MIG. Rows not posted
+  keep the light colours (`C610` error found by the checks, `C410` already there, `C310` simulated).
+
+## ZPTP_SPLIT_VAL_BATCH_COPY v1.6 (deletion flag column)
+- New ALV column *Deletion flag* (`GTY_OUT-DELFL`, after *Price ctrl*): the levels where the material is
+  flagged for deletion (LVORM), for example `Client, Plant 8Q01, SLoc in 8P01, Valuation 8P01`: client
+  (MARA), plant (MARC), storage location (MARD, any storage location of the plant) and valuation area
+  (MBEW, any valuation type) of the source and target plants. Blank = not flagged. Read in
+  `F_READ_MAT_INFO` (three `FOR ALL ENTRIES` selects, flagged rows only). Information only: nothing is
+  blocked (batches flagged for deletion, MCHA-LVORM, are still left out as before).
+
+## ZPTP_SPLIT_VAL_BATCH_COPY v1.5 (material type selection)
+- New select-option `S_MTART` (material type, `GV_SEL_MTART TYPE MARA-MTART`) in block B1, after
+  `S_CHARG`. `F_READ_BATCHES` joins MARA and keeps the batches of materials of these types;
+  `F_FILE_LEFTOVERS` leaves out silently the file lines of materials of other types (a material unknown
+  in MARA is still reported). Passed to the background job (`F_SUBMIT_JOB`). Blank = all types.
+- Selection text `S_MTART` *Material type*.
+
+## ZPTP_SPLIT_VAL_BATCH_COPY v1.4 (In file column)
+- New ALV column *In file* (`GTY_OUT-INFILE`, after *File line*): Yes when the item has a file line
+  (`GTY_ITEM-LINE` > 0: source batch matched by a file line, or file line found in no source batch),
+  No for a source batch without file line. Set in `F_ITEM_TO_OUT`.
+
+## ZPTP_SPLIT_VAL_BATCH_COPY v1.3 (material bands)
+- `F_ALV_BANDS` (before the display and after each Post): sorts `GT_OUT` like the ALV (status group,
+  material, batch), sets the status colour of every row (`F_SET_COLOR`) and gives the rows without one
+  (ready, online) the colour of their material band: white `C200` / light grey `C210`, alternating at
+  each change of material. Light blue is not used for the bands: it already means "already in the
+  plant".
+
+## ZPTP_SPLIT_VAL_BATCH_COPY v1.2 (material type, price control)
+- `F_READ_MAT_INFO` (after `F_READ_BATCHES`): material type (MARA-MTART) and price control in the
+  source plant (MBEW-VPRSV, header row with BWTAR blank: S standard price, V moving average price) of
+  the materials of the source batches and of the file, buffered in `GT_MAT`; copied to the list by
+  `F_ITEM_TO_OUT`.
+- New ALV columns *Mat. type* (after Material) and *Price ctrl <source plant>* (after the split
+  valuation column). The existing split-valuation column is now headed *Split val. <target plant>*.
+
+## What changed in v1.37 (Simulation fields greyed out, not hidden, in Online mode)
+- `AT SELECTION-SCREEN OUTPUT`: in Online mode `P_TEST` and `P_NOLOG` stay on the screen with
+  `SCREEN-INPUT = '0'` (display-only) instead of `SCREEN-ACTIVE = '0'` (hidden). `P_NOLOG` is also
+  display-only when `P_TEST` is unticked. Their values are kept; Online still clears `P_TEST` at
+  `START-OF-SELECTION`, so both are ignored there.
+
 ## What changed in v1.36 (ATC: DELETE without WHERE)
 - `F_CLEAR_LOGS` (option `P_CLR`): the two `DELETE FROM` without WHERE condition on ZPTP_MOV_EXEC and
   ZPTP_BATCH_EXT are intended (emptying the tables is the purpose of the option, guarded by S_TABU_NAM

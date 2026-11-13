@@ -4,7 +4,7 @@
 *& Project : HBM - Split Valuation migration
 *& Scope   : Copy of batch master data from the source plant to the
 *&           target plant, enriched with the valuation type of a file
-*& Version : v1.1
+*& Version : v1.8
 *& Package : ZPTP_SPLIT_VAL
 *&
 *&---------------------------------------------------------------------*
@@ -42,6 +42,31 @@
 *& value uses the SAP batch and shows the file batch and the flag
 *& "Punct. swapped" in the list. Neither exists: the file line is an
 *& error item showing both values. The file is never changed.
+*& v1.2 - ALV: material type (MARA-MTART), split valuation in the target
+*& plant (existing column, heading now names the plant) and price
+*& control in the source plant (MBEW-VPRSV of the header row, S standard
+*& price / V moving average price). F_READ_MAT_INFO.
+*& v1.3 - ALV: rows without a status colour (ready, online) alternate
+*& between white and light grey at each change of material, in the
+*& order shown; rows with a result keep their status colour. F_ALV_BANDS.
+*& v1.4 - ALV column "In file": Yes when the batch has a line in the
+*& file (or the row is a file line), No otherwise.
+*& v1.5 - select-option S_MTART (material type, MARA-MTART) next to
+*& S_MATNR / S_CHARG: only the batches of materials of these types are
+*& read; file lines of other material types are left out silently, as
+*& for S_MATNR. Blank = all types.
+*& v1.6 - ALV column "Deletion flag": every level where the material is
+*& flagged for deletion - client (MARA), plant (MARC), storage location
+*& (MARD, any of the plant) and valuation (MBEW) of the source and target
+*& plants. Blank = not flagged. Information only, nothing is blocked.
+*& v1.7 - result of a posting in strong colours on the whole row: batch
+*& created (S) bright green, creation failed (E) bright red (same codes
+*& as ZPTP_SPLIT_VAL_MIG). Rows not posted keep the light colours (red
+*& for an error found by the checks, blue already there, yellow
+*& simulated), so the posting results stand out.
+*& v1.8 - ALV no longer grouped by status: sorted by material ascending
+*& (separator line between two materials), then batch ascending within
+*& a material. Column "In file" after "Batch".
 *&
 *& Checks per batch (status E, batch not copied, otherwise):
 *&   - the material is extended to the target plant and batch-managed in
@@ -136,6 +161,8 @@ TYPES: BEGIN OF gty_item,
          charg TYPE charg_d,
          bwtar TYPE bwtar_d,
          split TYPE abap_bool,           " split-valuated in the target plant [v1.0]
+         mtart TYPE mtart,               " material type [v1.2]
+         vprsv TYPE vprsv,               " price control in the source plant [v1.2]
          multi TYPE abap_bool,           " several valuation types in the file [v1.0]
          bad   TYPE abap_bool,
          msg   TYPE bapi_msg,
@@ -152,10 +179,15 @@ TYPES: BEGIN OF gty_out,
          status  TYPE c LENGTH 1,
          id      TYPE i,                 " item number, hidden [v1.0]
          line    TYPE i,
+         infile  TYPE c LENGTH 3,        " Yes / No: batch in the file [v1.4]
          matnr   TYPE matnr,
          charg   TYPE charg_d,
          bwtar   TYPE bwtar_d,
          split   TYPE abap_bool,         " split-valuated in the target plant [v1.0]
+         mtart   TYPE mtart,             " material type [v1.2]
+         vprsv   TYPE vprsv,             " price control in the source plant [v1.2]
+         delfl   TYPE c LENGTH 100,       " levels where the material is flagged for deletion [v1.6]
+         posted  TYPE abap_bool,         " a creation was attempted for the row [v1.7]
          fcharg  TYPE charg_d,           " batch as in the file [v1.1]
          punct   TYPE abap_bool,         " "," / "." swapped to match [v1.1]
          message TYPE bapi_msg,
@@ -178,6 +210,14 @@ TYPES: BEGIN OF gty_tbat,
          bwtar TYPE bwtar_d,
        END OF gty_tbat,
        gtt_tbat TYPE SORTED TABLE OF gty_tbat WITH UNIQUE KEY matnr charg.
+* material type and price control in the source plant, per material
+*                                                              [v1.2]
+TYPES: BEGIN OF gty_matinfo,
+         matnr TYPE matnr,
+         mtart TYPE mtart,
+         vprsv TYPE vprsv,
+         delfl TYPE c LENGTH 100,         " levels flagged for deletion [v1.6]
+       END OF gty_matinfo.
 TYPES: BEGIN OF gty_vt,
          matnr TYPE matnr,
          bwtar TYPE bwtar_d,
@@ -191,13 +231,15 @@ DATA: gt_file  TYPE gtt_file,                                   " [v1.0]
       gt_split TYPE SORTED TABLE OF matnr WITH UNIQUE KEY table_line, " split-valuated in target [v1.0]
       gt_vt    TYPE gtt_vt,         " valuation types of the target plant [v1.0]
       gt_tbat  TYPE gtt_tbat,       " batches already in the target plant [v1.0]
+      gt_mat   TYPE SORTED TABLE OF gty_matinfo WITH UNIQUE KEY matnr, " type, price control [v1.2]
       gv_sim  TYPE abap_bool,          " simulation: background mode with P_TEST [v0.2]
       gv_job  TYPE abap_bool.          " the run was handed over to a background job [v0.7]
 
 * reference fields of the select-options                [v0.8, v1.0]
 DATA: gv_sel_stat  TYPE c LENGTH 1,
       gv_sel_matnr TYPE mara-matnr,
-      gv_sel_charg TYPE mcha-charg.
+      gv_sel_charg TYPE mcha-charg,
+      gv_sel_mtart TYPE mara-mtart.                             " [v1.5]
 
 *&---------------------------------------------------------------------*
 *&  Selection screen
@@ -209,7 +251,8 @@ SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-b01.
               p_wdst TYPE werks_d DEFAULT '8Q01'.                  " target plant
 * batches of the source plant to extend (blank = all)          [v1.0]
   SELECT-OPTIONS: s_matnr FOR gv_sel_matnr,
-                  s_charg FOR gv_sel_charg.
+                  s_charg FOR gv_sel_charg,
+                  s_mtart FOR gv_sel_mtart.                     " material type [v1.5]
 SELECTION-SCREEN END OF BLOCK b1.
 
 SELECTION-SCREEN BEGIN OF BLOCK b2 WITH FRAME TITLE TEXT-b02.
@@ -265,6 +308,8 @@ START-OF-SELECTION.
   PERFORM f_read_file.
 * source batches drive the run; the file gives the valuation types [v1.0]
   PERFORM f_read_batches.
+* material type and price control, for the list            [v1.2]
+  PERFORM f_read_mat_info.
   PERFORM f_match_file.
   PERFORM f_check_items.
   PERFORM f_file_leftovers.
@@ -318,6 +363,7 @@ FORM f_submit_job.
     WITH p_wdst = p_wdst
     WITH s_matnr IN s_matnr                                     " [v1.0]
     WITH s_charg IN s_charg
+    WITH s_mtart IN s_mtart                                     " [v1.5]
     WITH p_loc  = space
     WITH p_srv  = abap_true
     WITH p_file = p_file
@@ -667,12 +713,15 @@ FORM f_read_batches.
 
   CLEAR: gt_item, gt_marc, gt_split, gt_vt, gt_tbat.
 
-  SELECT matnr, charg FROM mcha
-    WHERE werks =  @p_wsrc
-      AND matnr IN @s_matnr
-      AND charg IN @s_charg
-      AND lvorm =  @space
-    ORDER BY matnr, charg
+* material type through MARA                                [v1.5]
+  SELECT c~matnr, c~charg FROM mcha AS c
+    INNER JOIN mara AS a ON a~matnr = c~matnr
+    WHERE c~werks =  @p_wsrc
+      AND c~matnr IN @s_matnr
+      AND c~charg IN @s_charg
+      AND c~lvorm =  @space
+      AND a~mtart IN @s_mtart
+    ORDER BY c~matnr, c~charg
     INTO TABLE @DATA(lt_src).
   IF lt_src IS INITIAL.
     RETURN.
@@ -729,6 +778,94 @@ FORM f_read_batches.
   LOOP AT gt_item ASSIGNING FIELD-SYMBOL(<ls_item>).
     READ TABLE gt_split TRANSPORTING NO FIELDS WITH TABLE KEY table_line = <ls_item>-matnr.
     <ls_item>-split = xsdbool( sy-subrc = 0 ).
+  ENDLOOP.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_READ_MAT_INFO                            [v1.2, v1.6]
+*&      Material type (MARA-MTART) and price control in the source plant
+*&      (MBEW-VPRSV of the header row, BWTAR blank: S standard price,
+*&      V moving average price) of the materials of the source batches
+*&      and of the file, for the list. v1.6: levels where the material
+*&      is flagged for deletion (LVORM): client (MARA), plant (MARC),
+*&      storage location (MARD, any) and valuation area (MBEW, any
+*&      valuation type) of the source and target plants.
+*&---------------------------------------------------------------------*
+FORM f_read_mat_info.
+  DATA lt_mat TYPE SORTED TABLE OF matnr WITH UNIQUE KEY table_line.
+
+  CLEAR gt_mat.
+  LOOP AT gt_item INTO DATA(ls_item).
+    INSERT ls_item-matnr INTO TABLE lt_mat.
+  ENDLOOP.
+  LOOP AT gt_file INTO DATA(ls_file) WHERE matnr IS NOT INITIAL.
+    INSERT ls_file-matnr INTO TABLE lt_mat.
+  ENDLOOP.
+  IF lt_mat IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  SELECT matnr, mtart, lvorm FROM mara
+    FOR ALL ENTRIES IN @lt_mat
+    WHERE matnr = @lt_mat-table_line
+    INTO TABLE @DATA(lt_mara).
+
+* deletion flags of the source and target plants             [v1.6]
+  SELECT matnr, werks FROM marc
+    FOR ALL ENTRIES IN @lt_mat
+    WHERE matnr =  @lt_mat-table_line
+      AND ( werks = @p_wsrc OR werks = @p_wdst )
+      AND lvorm <> @space
+    INTO TABLE @DATA(lt_marc_del).
+  SELECT DISTINCT matnr, werks FROM mard
+    FOR ALL ENTRIES IN @lt_mat
+    WHERE matnr =  @lt_mat-table_line
+      AND ( werks = @p_wsrc OR werks = @p_wdst )
+      AND lvorm <> @space
+    INTO TABLE @DATA(lt_mard_del).
+  SELECT DISTINCT matnr, bwkey FROM mbew
+    FOR ALL ENTRIES IN @lt_mat
+    WHERE matnr =  @lt_mat-table_line
+      AND ( bwkey = @p_wsrc OR bwkey = @p_wdst )
+      AND lvorm <> @space
+    INTO TABLE @DATA(lt_mbew_del).
+* plants in a stable order: source and target as numbered
+  SORT lt_marc_del BY matnr werks.
+  SORT lt_mard_del BY matnr werks.
+  SORT lt_mbew_del BY matnr bwkey.
+  SELECT matnr, vprsv FROM mbew
+    FOR ALL ENTRIES IN @lt_mat
+    WHERE matnr = @lt_mat-table_line
+      AND bwkey = @p_wsrc
+      AND bwtar = @space
+    INTO TABLE @DATA(lt_mbew).
+  SORT lt_mbew BY matnr.
+
+  DATA lv_del TYPE string.
+  LOOP AT lt_mara INTO DATA(ls_mara).
+    READ TABLE lt_mbew INTO DATA(ls_mbew) WITH KEY matnr = ls_mara-matnr BINARY SEARCH.
+    DATA(lv_vprsv) = COND vprsv( WHEN sy-subrc = 0 THEN ls_mbew-vprsv ).
+
+*   levels flagged for deletion, in a readable list           [v1.6]
+    CLEAR lv_del.
+    IF ls_mara-lvorm IS NOT INITIAL.
+      lv_del = `Client`.
+    ENDIF.
+    LOOP AT lt_marc_del INTO DATA(ls_cdel) WHERE matnr = ls_mara-matnr.
+      lv_del = |{ lv_del }{ COND string( WHEN lv_del IS NOT INITIAL THEN `, ` ) }Plant { ls_cdel-werks }|.
+    ENDLOOP.
+    LOOP AT lt_mard_del INTO DATA(ls_ddel) WHERE matnr = ls_mara-matnr.
+      lv_del = |{ lv_del }{ COND string( WHEN lv_del IS NOT INITIAL THEN `, ` ) }SLoc in { ls_ddel-werks }|.
+    ENDLOOP.
+    LOOP AT lt_mbew_del INTO DATA(ls_vdel) WHERE matnr = ls_mara-matnr.
+      lv_del = |{ lv_del }{ COND string( WHEN lv_del IS NOT INITIAL THEN `, ` ) }Valuation { ls_vdel-bwkey }|.
+    ENDLOOP.
+
+    INSERT VALUE gty_matinfo( matnr = ls_mara-matnr
+                              mtart = ls_mara-mtart
+                              vprsv = lv_vprsv
+                              delfl = lv_del )
+           INTO TABLE gt_mat.
   ENDLOOP.
 ENDFORM.
 
@@ -908,6 +1045,11 @@ FORM f_file_leftovers.
     CLEAR ls_item.
     IF ls_file-bad = abap_false.
       CHECK ls_file-matnr IN s_matnr.
+*     material type outside S_MTART: left out silently        [v1.5]
+      IF s_mtart[] IS NOT INITIAL.
+        READ TABLE gt_mat INTO DATA(ls_mat) WITH TABLE KEY matnr = ls_file-matnr.
+        CHECK sy-subrc <> 0 OR ls_mat-mtart IN s_mtart.
+      ENDIF.
       PERFORM f_norm_batch  USING ls_file-charg CHANGING lv_norm.
       PERFORM f_strip_batch USING ls_file-charg CHANGING lv_strip.
       IF ls_file-charg CA ',.'.                                   " [v1.1]
@@ -1074,6 +1216,7 @@ FORM f_process_items.
       ls_out-message = ls_item-pmsg.
     ELSE.
       PERFORM f_copy_batch USING ls_item CHANGING ls_out.
+      ls_out-posted = abap_true.                                " [v1.7]
     ENDIF.
     IF ls_item-note IS NOT INITIAL AND ls_out-status <> gc_st_err.
       ls_out-message = |{ ls_out-message } ({ ls_item-note })|.
@@ -1090,10 +1233,18 @@ FORM f_item_to_out USING    is_item TYPE gty_item
                    CHANGING cs_out  TYPE gty_out.
   cs_out-id    = is_item-id.
   cs_out-line  = is_item-line.
+  cs_out-infile = COND #( WHEN is_item-line > 0 THEN 'Yes' ELSE 'No' ).   " [v1.4]
   cs_out-matnr = is_item-matnr.
   cs_out-charg = is_item-charg.
   cs_out-bwtar = is_item-bwtar.
   cs_out-split = is_item-split.
+* material type and price control in the source plant      [v1.2]
+  READ TABLE gt_mat INTO DATA(ls_mat) WITH TABLE KEY matnr = is_item-matnr.
+  IF sy-subrc = 0.
+    cs_out-mtart = ls_mat-mtart.
+    cs_out-vprsv = ls_mat-vprsv.
+    cs_out-delfl = ls_mat-delfl.                                " [v1.6]
+  ENDIF.
   cs_out-fcharg = is_item-fcharg.                               " [v1.1]
   cs_out-punct = is_item-punct.                                 " [v1.1]
 ENDFORM.
@@ -1185,6 +1336,7 @@ FORM f_user_command USING r_ucomm     TYPE sy-ucomm
     IF sy-subrc = 0 AND ( <ls_out>-status = gc_st_open
                           OR ( <ls_out>-status = gc_st_err AND ls_item-pstat = gc_st_open ) ).
       PERFORM f_copy_batch USING ls_item CHANGING <ls_out>.
+      <ls_out>-posted = abap_true.                              " [v1.7]
       IF ls_item-note IS NOT INITIAL.
         <ls_out>-message = |{ <ls_out>-message } ({ ls_item-note })|.
       ENDIF.
@@ -1201,15 +1353,19 @@ FORM f_user_command USING r_ucomm     TYPE sy-ucomm
   lv_text = |{ lv_ok } batch(es) posted, { lv_err } error(s)|.
   lv_disp = COND #( WHEN lv_err > 0 THEN 'W' ELSE 'S' ).
   MESSAGE lv_text TYPE 'S' DISPLAY LIKE lv_disp.
+* statuses changed: order and material bands again           [v1.3]
+  PERFORM f_alv_bands.
   rs_selfield-refresh    = abap_true.
   rs_selfield-row_stable = abap_true.
   rs_selfield-col_stable = abap_true.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*&      Form  F_SET_COLOR                                       [v0.2]
-*&      Row colour: green = created or already there, red = error,
-*&      yellow = simulated, none = waiting (online).
+*&      Form  F_SET_COLOR                                [v0.2, v1.7]
+*&      Row colour: green = created, red = error, blue = already there,
+*&      yellow = simulated, none = waiting (online). After a posting
+*&      attempt (POSTED): strong green when created, strong red when the
+*&      creation failed.
 *&---------------------------------------------------------------------*
 FORM f_set_color CHANGING cs_out TYPE gty_out.
   cs_out-rowcolor = SWITCH #( cs_out-status
@@ -1218,6 +1374,15 @@ FORM f_set_color CHANGING cs_out TYPE gty_out.
                               WHEN gc_st_test  THEN 'C310'
                               WHEN gc_st_exist THEN 'C410'      " blue [v0.8]
                               ELSE space ).
+* result of a posting: strong green (created) / strong red (failed)
+* on the whole row, so that it stands out from the rows not posted
+*                                                              [v1.7]
+  IF cs_out-posted = abap_true.
+    CASE cs_out-status.
+      WHEN gc_st_ok.  cs_out-rowcolor = 'C511'.
+      WHEN gc_st_err. cs_out-rowcolor = 'C611'.
+    ENDCASE.
+  ENDIF.
 * grouping of the ALV: ready first (online), then simulated, created,
 * errors                                                       [v0.5]
   cs_out-stattx   = SWITCH #( cs_out-status
@@ -1342,13 +1507,23 @@ FORM f_display_alv.
   ls_fcat-no_zero = abap_true.                                 " 0 = not in the file [v1.0]
   MODIFY lt_fcat FROM ls_fcat INDEX lines( lt_fcat ).
   add_col 'MATNR'   'Material'.
+  add_col 'MTART'   'Mat. type'.                               " [v1.2]
   add_col 'CHARG'   'Batch'.
+  add_col 'INFILE'  'In file'.                                 " Yes / No [v1.4, after Batch v1.8]
   add_col 'FCHARG'  'File batch'.                              " [v1.1]
   add_col 'PUNCT'   'Punct. swapped'.                          " [v1.1]
   add_col 'BWTAR'   'Val.Type'.
   add_col 'SPLIT'   'Split val.'.                              " [v1.0]
   ls_fcat-checkbox = abap_true.
+* headings with the plant                                      [v1.2]
+  ls_fcat-seltext_l = ls_fcat-seltext_m = |Split val. { p_wdst }|.
+  ls_fcat-seltext_s = |Split { p_wdst }|.
   MODIFY lt_fcat FROM ls_fcat INDEX lines( lt_fcat ).
+  add_col 'VPRSV'   'Price ctrl'.                              " S / V [v1.2]
+  ls_fcat-seltext_l = ls_fcat-seltext_m = |Price ctrl { p_wsrc }|.
+  ls_fcat-seltext_s = |PC { p_wsrc }|.
+  MODIFY lt_fcat FROM ls_fcat INDEX lines( lt_fcat ).
+  add_col 'DELFL'   'Deletion flag'.                           " [v1.6]
   add_col 'MESSAGE' 'Message'.
 * technical sort key, not displayed                            [v0.5]
   add_col 'SORT_KEY' 'Sort'.
@@ -1357,10 +1532,13 @@ FORM f_display_alv.
   add_col 'ID' 'Item'.                                         " [v1.0]
   ls_fcat-no_out = abap_true.
   MODIFY lt_fcat FROM ls_fcat INDEX lines( lt_fcat ).
-  lt_sort = VALUE #( ( spos = 1 fieldname = 'SORT_KEY' up = abap_true )
-                     ( spos = 2 fieldname = 'STATTX'   up = abap_true group = 'UL' )
-                     ( spos = 3 fieldname = 'MATNR'    up = abap_true )
-                     ( spos = 4 fieldname = 'CHARG'    up = abap_true ) ).
+* grouped by material (separator line between two materials),
+* batches ascending within a material; no grouping by status [v1.8]
+  lt_sort = VALUE #( ( spos = 1 fieldname = 'MATNR' up = abap_true group = 'UL' )
+                     ( spos = 2 fieldname = 'CHARG' up = abap_true ) ).
+
+* material bands, in the order of the list                 [v1.3]
+  PERFORM f_alv_bands.
 
   IF gv_sim = abap_true.
     MESSAGE 'SIMULATION - no batch created' TYPE 'S'.
@@ -1387,4 +1565,40 @@ FORM f_display_alv.
               it_sort                 = lt_sort
     TABLES    t_outtab                = gt_out
     EXCEPTIONS program_error = 1 OTHERS = 2.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_ALV_BANDS                                       [v1.3]
+*&      GT_OUT in the order of the list (same criteria as the ALV sort:
+*&      material, batch - v1.8), then the row colour: a row with
+*&      a result keeps its status colour (F_SET_COLOR: green created,
+*&      red error, yellow simulated, blue already in the plant); a row
+*&      without one (ready, online) gets the light colour of its
+*&      material band, white and light grey alternating at each change
+*&      of material. Light blue is not used: it means "already there".
+*&---------------------------------------------------------------------*
+FORM f_alv_bands.
+  CONSTANTS: lc_band1 TYPE c LENGTH 4 VALUE 'C200',   " white
+             lc_band2 TYPE c LENGTH 4 VALUE 'C210'.   " light grey
+  DATA: lv_matnr TYPE matnr,
+        lv_alt   TYPE abap_bool,
+        lv_first TYPE abap_bool VALUE abap_true.
+
+  SORT gt_out STABLE BY matnr charg.                            " as the ALV [v1.8]
+
+  LOOP AT gt_out ASSIGNING FIELD-SYMBOL(<ls_out>).
+*   status colour, group and sort key of the row
+    PERFORM f_set_color CHANGING <ls_out>.
+*   new material: next band
+    IF lv_first = abap_true.
+      lv_first = abap_false.
+      lv_matnr = <ls_out>-matnr.
+    ELSEIF <ls_out>-matnr <> lv_matnr.
+      lv_alt   = xsdbool( lv_alt = abap_false ).
+      lv_matnr = <ls_out>-matnr.
+    ENDIF.
+    IF <ls_out>-rowcolor IS INITIAL.
+      <ls_out>-rowcolor = COND #( WHEN lv_alt = abap_true THEN lc_band2 ELSE lc_band1 ).
+    ENDIF.
+  ENDLOOP.
 ENDFORM.

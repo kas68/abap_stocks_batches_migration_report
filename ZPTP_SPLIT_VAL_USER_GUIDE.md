@@ -114,7 +114,7 @@ The report reads and checks the file exactly as in Background mode, but **posts 
 Good to know:
 - Lines that cannot be posted (rejected by a file check, zero quantity) show their result straight away.
 - A line already posted is skipped. A line that **failed can be posted again** once you have fixed the cause.
-- **Simulation does not apply**: the Simulation checkbox disappears when you choose Online, and every Post is real. The confirmation popup is your safeguard.
+- **Simulation does not apply**: the Simulation and Simulation without log checkboxes are greyed out when you choose Online (they keep their value but are ignored), and every Post is real. The confirmation popup is your safeguard.
 - Online mode needs a dialog session: it cannot be combined with "Run as background job".
 - Works with both processing options and all four stock types.
 
@@ -138,11 +138,11 @@ Ticked: every check runs and SAP checks the movements in test mode, but **nothin
 
 - Stock types 2 and 3: only the first movement (343 / 321) can be simulated, because the 301 needs the stock it moves.
 - Simulated runs never count as "already transferred" and never block a later real run.
-- Hidden and ignored in Online mode.
+- Greyed out and ignored in Online mode.
 
 #### Simulation without log (P_NOLOG) — ticked by default
 
-Applies only with Simulation ticked (it is greyed out otherwise, and hidden in Online mode).
+Applies only with Simulation ticked (it is greyed out otherwise, and in Online mode).
 
 - **Ticked:** the simulation writes **nothing** to the log tables ZPTP_MOV_EXEC and ZPTP_BATCH_EXT. The result is only in the ALV list (in the spool for a background job): keep or export it if you need it. A RUN_ID is shown in the list header for reference but is not stored, and no sequence is used up.
 - **Unticked:** the simulation is logged under its RUN_ID with the Simulation flag, like before. Use it when you want to keep the simulation (review, audit) or reprocess errors from it.
@@ -284,8 +284,8 @@ The filters also narrow the "stock missing from the file" step: run the final mi
 
 | Option | Option 1 (types 1-3) | Option 2 (types 1-3) | Project stock (type 4) | Online | Background |
 | --- | --- | --- | --- | --- | --- |
-| Simulation | yes | yes | yes | **no** (hidden) | yes |
-| Simulation without log | yes | yes | yes | **no** (hidden) | with Simulation |
+| Simulation | yes | yes | yes | **no** (greyed out) | yes |
+| Simulation without log | yes | yes | yes | **no** (greyed out) | with Simulation |
 | Run as background job | yes | yes | yes | **no** | yes |
 | Full / Direct | yes | ignored | ignored | yes | yes |
 | Deactivate qty check | yes | ignored | ignored | yes | yes |
@@ -491,7 +491,7 @@ A posted line keeps its success message ("Material document …"). Warnings foun
 | First data line missing | No header and the first quantity is not numeric: add a header line. |
 | Local file run fails in background | Use Application server. |
 | Dialog run stops with a time-out | Use "Run as background job", or "Max. materials per run". |
-| Simulation checkbox not visible | Online mode is selected: Simulation does not apply there. |
+| Simulation checkbox greyed out | Online mode is selected: Simulation does not apply there. |
 | A simulation run cannot be found in ZPTP_MOV_EXEC | "Simulation without log" was ticked (default): the result was only in the list. Untick it to log simulations. |
 | Many lines in 006 although stock exists | Wrong stock type, or filters (material type, batch) too narrow. |
 
