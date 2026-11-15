@@ -3,7 +3,7 @@
 *&---------------------------------------------------------------------*
 *& Project : HBM - Split Valuation migration
 *& Scope   : Clearing of batch stocks / Inter-plant transfer
-*& Version : v1.37
+*& Version : v1.38
 *& Package : ZPTP_SPLIT_VAL        Message class: ZPTP_SPLIT_VAL
 *&
 *&---------------------------------------------------------------------*
@@ -119,6 +119,9 @@
 *&   type of the material in the target plant; none when the material is
 *&   not split-valuated there. Full Validation Mode, option 1, normal run
 *&   (not on a reprocess-errors run), as the former check.
+*&   v1.38: for batch-managed materials the valuation type comes from
+*&   the batch in the target plant or ZPTP_301_VALTYPE (see v1.38 below);
+*&   the rule above stays for non-batch materials.
 *&
 *& Already transferred (v1.8): before posting, every line is looked up in
 *&   ZPTP_MOV_EXEC for a real 301 already posted (status S, not a
@@ -141,12 +144,43 @@
 *&     - no batch: the batch is created as in ZPTP_SPLIT_VAL_BATCH_COPY
 *&       (F_EXTEND_BATCH: source batch attributes, classification not
 *&       copied) with the valuation type of ZPTP_301_VALTYPE.
-*&   ZPTP_301_VALTYPE: active entries of the fiscal year of the posting
-*&   date (T001W-BWKEY -> T001K-BUKRS -> T001-PERIV of the target plant),
-*&   most specific first: plant + material type, plant, material type,
-*&   generic. A failing line is logged with status W and skipped; the
-*&   next one is processed. P_SPLIT / P_NONSPL, P_FULL / P_DIR, P_NOQTY
-*&   and P_ZBAT do not apply.
+*&   ZPTP_301_VALTYPE: v1.38 rules below (until v1.37: active entries of
+*&   the fiscal year of the posting date, most specific first: plant +
+*&   material type, plant, material type, generic). A failing line is
+*&   logged with status W and skipped (v1.38: status E when ZPTP_301_
+*&   VALTYPE gives no single entry, 058 / 064); the next one is processed.
+*&   P_SPLIT / P_NONSPL, P_FULL / P_DIR, P_NOQTY and P_ZBAT do not apply.
+*&
+*& Valuation type of the batches without a file line (v1.38) - option 1
+*&   (batches with stock of the transfer mode added by
+*&   F_CHECK_SAP_NOT_IN_FILE) and mode 4 (project stock, no file). Every
+*&   such batch has stock (> 0) in the source plant. Lines of the file
+*&   keep their valuation type.
+*&     - batch already in the target plant with a valuation type: that
+*&       one, nothing is determined;
+*&     - rule 1, material not split-valuated in the target plant: no
+*&       valuation type (mode 4 too, until v1.37 it needed one);
+*&     - rule 2, split-valuated: ZPTP_301_VALTYPE, active entry (ACTIVE
+*&       = X) with WERKS = target plant and MTART = material type
+*&       (F_DETERMINE_VALTYPE):
+*&         1 reference fiscal year = fiscal year of the first posting
+*&           date (BUDAT) of the batch in the source plant (MATDOC on
+*&           MATBF, reversal movements and the movements they reversed
+*&           left out: REVERSAL_MOVEMENT, CANCELLED);
+*&         2 entry of the reference fiscal year;
+*&         3 no movement, or no entry: entry of the fiscal year of the
+*&           posting date P_BUDAT;
+*&         4 several active entries for the fiscal year read: error 064
+*&           (plant, material type, fiscal year), no fallback, the batch
+*&           is not created;
+*&         5 no entry in step 2 nor 3: error 058 (material, batch, both
+*&           plants, material type, fiscal years tried), the batch is not
+*&           created.
+*&       The run goes on with the next line. The valuation type must
+*&       exist in the target plant (MBEW, 003).
+*&   Fiscal years: fiscal year variant of the company code of the target
+*&   plant (T001W-BWKEY -> T001K-BUKRS -> T001-PERIV). Same rules as
+*&   ZPTP_SPLIT_VAL_BATCH_COPY v1.9.
 *&
 *& Batch number of the file (v1.10): a numeric batch is normalised with
 *&   leading zeros to 10 characters (123 -> 0000000123) and matched
@@ -344,7 +378,8 @@ CONSTANTS:
   gc_xfer_blk   TYPE c VALUE '2',   " blocked: 343 / 301 / 344
   gc_xfer_qi    TYPE c VALUE '3',   " quality inspection: 321 / 301 / 322
   gc_xfer_prj   TYPE c VALUE '4',   " project stock: 301 Q            [v1.9]
-  gc_sobkz_prj  TYPE sobkz VALUE 'Q'.  " special stock: project       [v1.9]
+  gc_sobkz_prj  TYPE sobkz VALUE 'Q',  " special stock: project       [v1.9]
+  gc_mdoc       TYPE c LENGTH 4 VALUE 'MDOC'. " MATDOC-RECORD_TYPE, material document item [v1.38]
 
 * online mode                                                  [v1.13]
 CONSTANTS:
@@ -829,15 +864,30 @@ TYPES: BEGIN OF gty_wbs,
        END OF gty_wbs.
 DATA: gt_wbs TYPE SORTED TABLE OF gty_wbs WITH UNIQUE KEY pspnr.
 
-* valuation type rules of ZPTP_301_VALTYPE, active entries of the fiscal
-* year of the posting date, target plant or all plants        [v1.9]
+* valuation type of the batches not in the file (option 1) and of the
+* project stock (mode 4): active ZPTP_301_VALTYPE entries of the target
+* plant, every material type and fiscal year              [v1.9, v1.38]
 TYPES: BEGIN OF gty_vtrule,
-         werks TYPE werks_d,
          mtart TYPE mtart,
+         gjahr TYPE gjahr,
          bwtar TYPE bwtar_d,
-       END OF gty_vtrule.
-DATA: gt_vtrule TYPE SORTED TABLE OF gty_vtrule WITH UNIQUE KEY werks mtart,
-      gv_gjahr  TYPE gjahr.                       " fiscal year of P_BUDAT, target company code
+       END OF gty_vtrule,
+       BEGIN OF gty_first,               " first valid movement in the source plant
+         matnr TYPE matnr,
+         charg TYPE charg_d,
+         budat TYPE budat,
+       END OF gty_first,
+       BEGIN OF gty_fy,                  " fiscal year of a date, buffer
+         datum TYPE datum,
+         gjahr TYPE gjahr,
+       END OF gty_fy.
+* not unique on MTART + GJAHR: several active entries are an error [v1.38]
+DATA: gt_vtrule   TYPE SORTED TABLE OF gty_vtrule WITH NON-UNIQUE KEY mtart gjahr,
+      gt_first    TYPE SORTED TABLE OF gty_first WITH UNIQUE KEY matnr charg,
+      gt_fy       TYPE HASHED TABLE OF gty_fy WITH UNIQUE KEY datum,
+      gv_periv    TYPE periv,            " fiscal year variant, company code of the target plant
+      gv_gjahr_bud TYPE gjahr,           " fiscal year of the posting date P_BUDAT
+      gv_vt_read  TYPE abap_bool.        " F_READ_VALTYPE_RULES done
 
 * valuation type of a batch in the target plant, transfer mode 4, once
 * per material + batch (former local type of F_PROCESS_PROJECT) [v1.13]
@@ -1736,7 +1786,8 @@ FORM f_init.
                                  THEN 'DIRECT' ELSE 'FULL' ).
   IF gv_xfer = gc_xfer_prj.                                     " [v1.9]
     WRITE: / 'Option: project stock, no input file - quantities from MSPR,',
-             'valuation type from plant', p_wdst, '/ ZPTP_301_VALTYPE, fiscal year', gv_gjahr.
+             'valuation type from plant', p_wdst, '/ ZPTP_301_VALTYPE (fiscal year of the first',
+             'movement, else of the posting date', gv_gjahr_bud, ')'.
     WRITE: / 'Stock moved:', gv_move_txt, '(301 Q, same WBS element)'.
   ELSE.
   WRITE: / 'Option:', COND string( WHEN p_nonspl = abap_true
@@ -1788,8 +1839,9 @@ FORM f_log_run_params.
                                       ELSE gc_mov_type ).
   IF gv_xfer = gc_xfer_prj.                                     " [v1.9]
     ls_out-message = |Run parameters: transfer mode 4 project stock (301 Q, same WBS element), | &&
-                     |no input file, valuation type: batch of plant { p_wdst } or ZPTP_301_VALTYPE | &&
-                     |fiscal year { gv_gjahr } ({ lines( gt_vtrule ) } active rule(s))| &&
+                     |no input file, valuation type: batch of { p_wdst } or ZPTP_301_VALTYPE | &&
+                     |(FY of 1st movement, else of posting date { gv_gjahr_bud }; | &&
+                     |{ lines( gt_vtrule ) } entries)| &&
                      |{ COND string( WHEN p_reprc = abap_true THEN ', reprocess errors only' ) }| &&
                      |{ COND string( WHEN p_maxmt > 0 THEN |, max. { p_maxmt } materials| ) }| &&
                      |{ COND string( WHEN p_onl = abap_true THEN ', ONLINE' ) }|.         " [v1.13]
@@ -3110,6 +3162,17 @@ ENDFORM.
 *&      Form  F_CHECK_SAP_NOT_IN_FILE   (3.2 case 2)        [v1.6]
 *&      SAP stock not present in the file: added as a line of its own,
 *&      posted with the SAP stock and a warning (see the header).
+*&      Valuation type (v1.38) of a batch-managed material:
+*&        - not split-valuated in the target plant: none;
+*&        - split-valuated, batch already in the target plant with a
+*&          valuation type: that one (no batch to create);
+*&        - split-valuated otherwise: F_DETERMINE_VALTYPE
+*&          (ZPTP_301_VALTYPE); several entries (064) or none (058):
+*&          the line is an error, the batch is not created.
+*&      Non-batch material: as in v1.6 (valuation type of the file for the
+*&      material when unique, else the first one in the target plant).
+*&      Every line added has stock of the transfer mode (> 0) in the
+*&      source plant.
 *&---------------------------------------------------------------------*
 FORM f_check_sap_not_in_file.
 * v1.6: stock of a material + batch missing from the file is added as a
@@ -3118,14 +3181,28 @@ FORM f_check_sap_not_in_file.
   TYPES: BEGIN OF lty_fvt,
            matnr TYPE matnr,
            bwtar TYPE bwtar_d,
-         END OF lty_fvt.
+         END OF lty_fvt,
+         BEGIN OF lty_tbat,                   " batch in the target plant [v1.38]
+           matnr TYPE matnr,
+           charg TYPE charg_d,
+           bwtar TYPE bwtar_d,
+         END OF lty_tbat.
   DATA: ls_stk  TYPE gty_stock,
         ls_out  TYPE gty_out,
         ls_raw  TYPE gty_input_raw,
+        ls_mrc  TYPE gty_marc,
         lt_fvt  TYPE SORTED TABLE OF lty_fvt WITH UNIQUE KEY matnr bwtar,
+        lt_cand TYPE STANDARD TABLE OF gty_stock WITH DEFAULT KEY,      " [v1.38]
+        lt_key  TYPE gtt_badkey,                                        " [v1.38]
+        lt_tbat TYPE SORTED TABLE OF lty_tbat WITH UNIQUE KEY matnr charg, " [v1.38]
         lv_nvt  TYPE i,
         lv_vt   TYPE bwtar_d,
-        lv_rule TYPE string.
+        lv_rule TYPE string,
+        lv_bat  TYPE abap_bool,
+        lv_ok   TYPE abap_bool,
+        lv_no   TYPE symsgno,
+        lv_msg  TYPE bapi_msg,
+        lv_info TYPE bapi_msg.
 
   IF gv_run_mode = gc_mode_dir.
     RETURN.                          " Direct mode bypasses validations
@@ -3136,6 +3213,7 @@ FORM f_check_sap_not_in_file.
     INSERT VALUE lty_fvt( matnr = ls_raw-matnr bwtar = ls_raw-bwtar ) INTO TABLE lt_fvt.
   ENDLOOP.
 
+* --- candidates: SAP stock of the transfer mode, no line in the file --
   LOOP AT gt_stock INTO ls_stk.
     READ TABLE gt_input_sum TRANSPORTING NO FIELDS
          WITH KEY matnr = ls_stk-matnr charg = ls_stk-charg.
@@ -3172,40 +3250,99 @@ FORM f_check_sap_not_in_file.
       CONTINUE.
     ENDIF.
 
-*   valuation type: the file's one for this material, when unique
-    CLEAR: lv_vt, lv_rule, lv_nvt.
-    LOOP AT lt_fvt INTO DATA(ls_fvt) WHERE matnr = ls_stk-matnr.
-      lv_nvt = lv_nvt + 1.
-      lv_vt  = ls_fvt-bwtar.
-    ENDLOOP.
-    IF lv_nvt = 1.
-      lv_rule = |valuation type { lv_vt } of the other batches of the material in the file|.
-    ELSE.
-      lv_vt = lcl_help=>first_bwtar( iv_matnr = ls_stk-matnr iv_bwkey = p_wdst ).
-      IF lv_vt IS NOT INITIAL.
-        lv_rule = |first valuation type { lv_vt } of the material in plant { p_wdst }|.
-      ENDIF.
+    APPEND ls_stk TO lt_cand.
+*   batch of a material split-valuated in the target plant  [v1.38]
+    IF ls_stk-xchpf = gc_xchpf AND ls_stk-charg IS NOT INITIAL
+       AND lcl_help=>is_split_valuated( iv_matnr = ls_stk-matnr iv_bwkey = p_wdst ) = abap_true.
+      INSERT VALUE gty_badkey( matnr = ls_stk-matnr charg = ls_stk-charg ) INTO TABLE lt_key.
     ENDIF.
+  ENDLOOP.
 
+* --- data for the valuation type of these batches          [v1.38]
+  IF lt_key IS NOT INITIAL.
+    SELECT matnr, charg, bwtar FROM mcha
+      FOR ALL ENTRIES IN @lt_key
+      WHERE matnr = @lt_key-matnr
+        AND werks = @p_wdst
+        AND charg = @lt_key-charg
+      INTO CORRESPONDING FIELDS OF TABLE @lt_tbat.
+*   batches already in the target plant with a valuation type need none
+    LOOP AT lt_tbat INTO DATA(ls_tbat) WHERE bwtar IS NOT INITIAL.
+      DELETE TABLE lt_key WITH TABLE KEY matnr = ls_tbat-matnr charg = ls_tbat-charg.
+    ENDLOOP.
+    IF lt_key IS NOT INITIAL.
+      PERFORM f_read_valtype_rules.
+      PERFORM f_read_first_moves USING lt_key.
+    ENDIF.
+  ENDIF.
+
+* --- one line per candidate ---------------------------------------------
+  LOOP AT lt_cand INTO ls_stk.
+    CLEAR: lv_vt, lv_rule, lv_nvt, lv_ok, lv_no, lv_msg, lv_info.
     CLEAR ls_raw.
     ls_raw-matnr = ls_stk-matnr.
     ls_raw-charg = ls_stk-charg.
-    ls_raw-bwtar = lv_vt.
     ls_raw-menge = ls_stk-mfree.               " stock of the transfer mode
     ls_raw-meins = ls_stk-meins.
     ls_raw-auto  = abap_true.
+    lv_bat = xsdbool( ls_stk-xchpf = gc_xchpf AND ls_stk-charg IS NOT INITIAL ).
 
-    IF lv_vt IS INITIAL.
-      IF lcl_help=>is_split_valuated( iv_matnr = ls_stk-matnr iv_bwkey = p_wdst ) = abap_true.
-*       split-valuated in the target plant but no valuation type known
-        ls_raw-bad   = abap_true.
-        ls_raw-badno = '010'.
-        ls_raw-badtx = |Batch not in the input file, SAP stock { ls_stk-mfree } { ls_stk-meins } | &&
-                       |- no valuation type found in plant { p_wdst }: not posted|.
-      ELSE.
+    IF lv_bat = abap_true.
+*     batch-managed: rules 1 / 2 of v1.38
+      IF lcl_help=>is_split_valuated( iv_matnr = ls_stk-matnr iv_bwkey = p_wdst ) = abap_false.
         lv_rule = |no valuation type, material not split-valuated in plant { p_wdst }|.
+      ELSE.
+        READ TABLE lt_tbat INTO ls_tbat
+             WITH TABLE KEY matnr = ls_stk-matnr charg = ls_stk-charg.
+        IF sy-subrc = 0 AND ls_tbat-bwtar IS NOT INITIAL.
+          lv_vt   = ls_tbat-bwtar.
+          lv_rule = |valuation type { lv_vt } of batch { ls_stk-charg } in plant { p_wdst }|.
+        ELSE.
+          CLEAR ls_mrc.
+          READ TABLE gt_marc INTO ls_mrc
+               WITH TABLE KEY matnr = ls_stk-matnr werks = p_wsrc.
+          PERFORM f_determine_valtype USING ls_stk-matnr ls_stk-charg ls_mrc-mtart
+                                      CHANGING lv_vt lv_ok lv_no lv_msg lv_info.
+          IF lv_ok = abap_true.
+            lv_rule = |valuation type { lv_vt } of { lv_info }|.
+          ELSE.
+*           several entries (064) or none (058): error, batch not created
+            ls_raw-bad   = abap_true.
+            ls_raw-badno = lv_no.
+*           (MSGTX is 200 characters: the context comes last)
+            ls_raw-badtx = |{ lv_msg } (no line in the file)|.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ELSE.
+*     not batch-managed: valuation type of the file for this material,
+*     when unique, else the first one in the target plant (v1.6)
+      LOOP AT lt_fvt INTO DATA(ls_fvt) WHERE matnr = ls_stk-matnr.
+        lv_nvt = lv_nvt + 1.
+        lv_vt  = ls_fvt-bwtar.
+      ENDLOOP.
+      IF lv_nvt = 1.
+        lv_rule = |valuation type { lv_vt } of the other batches of the material in the file|.
+      ELSE.
+        lv_vt = lcl_help=>first_bwtar( iv_matnr = ls_stk-matnr iv_bwkey = p_wdst ).
+        IF lv_vt IS NOT INITIAL.
+          lv_rule = |first valuation type { lv_vt } of the material in plant { p_wdst }|.
+        ENDIF.
+      ENDIF.
+      IF lv_vt IS INITIAL.
+        IF lcl_help=>is_split_valuated( iv_matnr = ls_stk-matnr iv_bwkey = p_wdst ) = abap_true.
+*         split-valuated in the target plant but no valuation type known
+          ls_raw-bad   = abap_true.
+          ls_raw-badno = '010'.
+          ls_raw-badtx = |Batch not in the input file, SAP stock { ls_stk-mfree } { ls_stk-meins } | &&
+                         |- no valuation type found in plant { p_wdst }: not posted|.
+        ELSE.
+          lv_rule = |no valuation type, material not split-valuated in plant { p_wdst }|.
+        ENDIF.
       ENDIF.
     ENDIF.
+
+    ls_raw-bwtar = lv_vt.
     IF ls_raw-bad = abap_false.
       ls_raw-warn   = |Batch not in the input file - posted with the SAP stock { ls_stk-mfree } | &&
                       |{ ls_stk-meins } ({ gv_move_txt }), { lv_rule }|.
@@ -3835,16 +3972,24 @@ FORM f_process_line USING is_raw TYPE gty_input_raw.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*&      Form  F_READ_VALTYPE_RULES                              [v1.9]
-*&      Transfer mode 4: fiscal year of the posting date in the company
-*&      code of the target plant (T001W-BWKEY -> T001K-BUKRS ->
-*&      T001-PERIV), then the active ZPTP_301_VALTYPE entries of that
-*&      year for the target plant or for all plants (WERKS blank).
+*&      Form  F_READ_VALTYPE_RULES                       [v1.9, v1.38]
+*&      Data of F_DETERMINE_VALTYPE, read once per run:
+*&        - fiscal year variant of the company code of the target plant
+*&          (T001W-BWKEY -> T001K-BUKRS -> T001-PERIV);
+*&        - fallback fiscal year = fiscal year of the posting date
+*&          P_BUDAT (GV_GJAHR_BUD);
+*&        - active ZPTP_301_VALTYPE entries of the target plant, every
+*&          material type and fiscal year (v1.38: no generic entry with
+*&          blank plant or material type any more).
+*&      Called by F_INIT in mode 4, by F_CHECK_SAP_NOT_IN_FILE (option 1)
+*&      when a batch needs it.
 *&---------------------------------------------------------------------*
 FORM f_read_valtype_rules.
-  DATA lv_periv TYPE periv.
 
-  CLEAR: gt_vtrule, gv_gjahr.
+  IF gv_vt_read = abap_true.
+    RETURN.
+  ENDIF.
+  CLEAR: gt_vtrule, gt_fy, gv_periv, gv_gjahr_bud.
 
   SELECT SINGLE bwkey FROM t001w INTO @DATA(lv_bwkey)
     WHERE werks = @p_wdst.
@@ -3853,68 +3998,221 @@ FORM f_read_valtype_rules.
   IF sy-subrc <> 0.
     MESSAGE |No company code for valuation area { lv_bwkey } of plant { p_wdst } (T001K)| TYPE 'E'.
   ENDIF.
-  SELECT SINGLE periv FROM t001 INTO @lv_periv
+  SELECT SINGLE periv FROM t001 INTO @gv_periv
     WHERE bukrs = @lv_bukrs.
-  IF sy-subrc <> 0 OR lv_periv IS INITIAL.
+  IF sy-subrc <> 0 OR gv_periv IS INITIAL.
     MESSAGE |No fiscal year variant for company code { lv_bukrs } (T001-PERIV)| TYPE 'E'.
   ENDIF.
 
-  CALL FUNCTION 'DATE_TO_PERIOD_CONVERT'
-    EXPORTING  i_date         = p_budat
-               i_periv        = lv_periv
-    IMPORTING  e_gjahr        = gv_gjahr
-    EXCEPTIONS input_false    = 1
-               t009_notfound  = 2
-               t009b_notfound = 3
-               OTHERS         = 4.
-  IF sy-subrc <> 0.
-    MESSAGE |Fiscal year of posting date { p_budat DATE = USER } cannot be determined | &&
-            |(fiscal year variant { lv_periv }, return code { sy-subrc })| TYPE 'E'.
+  PERFORM f_fiscal_year USING p_budat CHANGING gv_gjahr_bud.
+  IF gv_gjahr_bud IS INITIAL.
+    MESSAGE |Fiscal year of the posting date { p_budat DATE = USER } cannot be determined | &&
+            |(fiscal year variant { gv_periv })| TYPE 'E'.
   ENDIF.
 
-  SELECT werks, mtart, bwtar FROM zptp_301_valtype
-    INTO CORRESPONDING FIELDS OF TABLE @gt_vtrule
-    WHERE gjahr  =  @gv_gjahr
-      AND active =  @abap_true
-      AND ( werks = @p_wdst OR werks = @space ).
+  SELECT mtart, gjahr, bwtar FROM zptp_301_valtype
+    WHERE werks  = @p_wdst
+      AND active = @abap_true
+    INTO CORRESPONDING FIELDS OF TABLE @gt_vtrule.
   IF gt_vtrule IS INITIAL.
 *   not blocking: batches of the target plant that already carry a
-*   valuation type do not need a rule
-    DATA(lv_txt) = |No active entry in ZPTP_301_VALTYPE for plant { p_wdst } and fiscal year | &&
-                   |{ gv_gjahr }: only batches that already have a valuation type in { p_wdst } | &&
-                   |can be transferred|.
+*   valuation type, and materials not split-valuated, need no entry
+    DATA(lv_txt) = |No active entry in ZPTP_301_VALTYPE for plant { p_wdst }: only batches | &&
+                   |that already have a valuation type in { p_wdst }, or of materials not | &&
+                   |split-valuated there, can be transferred without a line in the file|.
     WRITE: / lv_txt COLOR COL_NEGATIVE.
+  ENDIF.
+  gv_vt_read = abap_true.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_READ_FIRST_MOVES                                [v1.38]
+*&      First posting date of each batch of IT_KEY in the source plant,
+*&      into GT_FIRST (added to what is there): MATDOC, material document
+*&      items only (RECORD_TYPE MDOC), reversal movements
+*&      (REVERSAL_MOVEMENT) and the movements they reversed (CANCELLED)
+*&      left out. Material matched on MATBF (material in respect of which
+*&      stock is managed, = MCHA-MATNR of the batch), a field of a MATDOC
+*&      index (ATC "large table"), as in ZPTP_SPLIT_VAL_BATCH_COPY.
+*&---------------------------------------------------------------------*
+FORM f_read_first_moves USING it_key TYPE gtt_badkey.
+  DATA lt_key TYPE gtt_badkey.
+
+* batches already read are not read again
+  LOOP AT it_key INTO DATA(ls_key).
+    READ TABLE gt_first TRANSPORTING NO FIELDS
+         WITH TABLE KEY matnr = ls_key-matnr charg = ls_key-charg.
+    CHECK sy-subrc <> 0.
+    INSERT ls_key INTO TABLE lt_key.
+  ENDLOOP.
+  IF lt_key IS INITIAL.
+    RETURN.
+  ENDIF.
+
+  SELECT matbf AS matnr, charg, budat FROM matdoc
+    FOR ALL ENTRIES IN @lt_key
+    WHERE matbf             = @lt_key-matnr
+      AND charg             = @lt_key-charg
+      AND werks             = @p_wsrc
+      AND record_type       = @gc_mdoc
+      AND cancelled         = @space
+      AND reversal_movement = @space
+    INTO TABLE @DATA(lt_mov).
+  SORT lt_mov BY matnr charg budat.
+  DELETE ADJACENT DUPLICATES FROM lt_mov COMPARING matnr charg.  " earliest date kept
+  LOOP AT lt_mov INTO DATA(ls_mov).
+    INSERT VALUE gty_first( matnr = ls_mov-matnr charg = ls_mov-charg budat = ls_mov-budat )
+           INTO TABLE gt_first.
+  ENDLOOP.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_FISCAL_YEAR                                     [v1.38]
+*&      Fiscal year of a date in the fiscal year variant of the target
+*&      plant (GV_PERIV), buffered per date. Blank when it cannot be
+*&      determined.
+*&---------------------------------------------------------------------*
+FORM f_fiscal_year USING    iv_date  TYPE datum
+                   CHANGING cv_gjahr TYPE gjahr.
+  DATA ls_fy TYPE gty_fy.
+
+  READ TABLE gt_fy INTO ls_fy WITH TABLE KEY datum = iv_date.
+  IF sy-subrc <> 0.
+    ls_fy-datum = iv_date.
+    CALL FUNCTION 'DATE_TO_PERIOD_CONVERT'
+      EXPORTING  i_date         = iv_date
+                 i_periv        = gv_periv
+      IMPORTING  e_gjahr        = ls_fy-gjahr
+      EXCEPTIONS input_false    = 1
+                 t009_notfound  = 2
+                 t009b_notfound = 3
+                 OTHERS         = 4.
+    IF sy-subrc <> 0.
+      CLEAR ls_fy-gjahr.
+    ENDIF.
+    INSERT ls_fy INTO TABLE gt_fy.
+  ENDIF.
+  cv_gjahr = ls_fy-gjahr.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_FIND_VTRULE                                     [v1.38]
+*&      Active ZPTP_301_VALTYPE entries of the target plant for a
+*&      material type and a fiscal year: their number and, when there is
+*&      exactly one, its valuation type.
+*&---------------------------------------------------------------------*
+FORM f_find_vtrule USING    iv_mtart TYPE mtart
+                            iv_gjahr TYPE gjahr
+                   CHANGING cv_count TYPE i
+                            cv_bwtar TYPE bwtar_d.
+  CLEAR: cv_count, cv_bwtar.
+  LOOP AT gt_vtrule INTO DATA(ls_rule) WHERE mtart = iv_mtart AND gjahr = iv_gjahr.
+    cv_count = cv_count + 1.
+    cv_bwtar = ls_rule-bwtar.
+  ENDLOOP.
+  IF cv_count <> 1.
+    CLEAR cv_bwtar.
   ENDIF.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*&      Form  F_VALTYPE_RULE                                    [v1.9]
-*&      Valuation type of ZPTP_301_VALTYPE for a material type, most
-*&      specific entry first: plant + material type, plant only, material
-*&      type only, generic. An entry without valuation type is ignored.
-*&      Blank when no entry matches.
+*&      Form  F_DETERMINE_VALTYPE                               [v1.38]
+*&      Valuation type of a batch of a material split-valuated in the
+*&      target plant, from the active ZPTP_301_VALTYPE entries of the
+*&      target plant and of the material type (F_READ_VALTYPE_RULES and
+*&      F_READ_FIRST_MOVES must have run):
+*&        1  reference fiscal year = fiscal year of the first posting
+*&           date of the batch in the source plant (GT_FIRST);
+*&        2  entry of the reference fiscal year;
+*&        3  no movement, or no entry: entry of the fiscal year of the
+*&           posting date P_BUDAT;
+*&        4  several active entries for the fiscal year read: error 064,
+*&           no fallback;
+*&        5  no entry in step 2 nor 3: error 058.
+*&      CV_OK false: CV_NO / CV_MSG give the error, the batch must not be
+*&      created. CV_INFO tells which step gave the valuation type.
 *&---------------------------------------------------------------------*
-FORM f_valtype_rule USING    iv_mtart TYPE mtart
-                    CHANGING cv_bwtar TYPE bwtar_d
-                             cv_rule  TYPE string.
-  DATA: lt_try  TYPE STANDARD TABLE OF gty_vtrule WITH DEFAULT KEY,
-        ls_rule TYPE gty_vtrule.
+FORM f_determine_valtype USING    iv_matnr TYPE matnr
+                                  iv_charg TYPE charg_d
+                                  iv_mtart TYPE mtart
+                         CHANGING cv_bwtar TYPE bwtar_d
+                                  cv_ok    TYPE abap_bool
+                                  cv_no    TYPE symsgno
+                                  cv_msg   TYPE bapi_msg
+                                  cv_info  TYPE bapi_msg.
+  DATA: lv_ref   TYPE gjahr,         " reference fiscal year (first movement)
+        lv_count TYPE i,
+        lv_tried TYPE string,        " fiscal years read, for the messages
+        lv_src   TYPE string.
 
-  CLEAR: cv_bwtar, cv_rule.
-  lt_try = VALUE #( ( werks = p_wdst mtart = iv_mtart )
-                    ( werks = p_wdst mtart = space )
-                    ( werks = space  mtart = iv_mtart )
-                    ( werks = space  mtart = space ) ).
-  LOOP AT lt_try INTO DATA(ls_try).
-    READ TABLE gt_vtrule INTO ls_rule
-         WITH TABLE KEY werks = ls_try-werks mtart = ls_try-mtart.
-    IF sy-subrc = 0 AND ls_rule-bwtar IS NOT INITIAL.
-      cv_bwtar = ls_rule-bwtar.
-      cv_rule  = |ZPTP_301_VALTYPE { COND string( WHEN ls_try-werks IS INITIAL THEN `*` ELSE ls_try-werks ) }| &&
-                 |/{ COND string( WHEN ls_try-mtart IS INITIAL THEN `*` ELSE ls_try-mtart ) }/{ gv_gjahr }|.
+  CLEAR: cv_bwtar, cv_ok, cv_no, cv_msg, cv_info.
+
+* 1 reference fiscal year: first valid movement in the source plant
+  READ TABLE gt_first INTO DATA(ls_first)
+       WITH TABLE KEY matnr = iv_matnr charg = iv_charg.
+  IF sy-subrc = 0.
+    PERFORM f_fiscal_year USING ls_first-budat CHANGING lv_ref.
+    IF lv_ref IS INITIAL.
+      lv_tried = |fiscal year of the first movement { ls_first-budat DATE = USER } not determined|.
+    ENDIF.
+  ELSE.
+    lv_tried = |no valid movement in plant { p_wsrc }|.
+  ENDIF.
+
+* 2 primary lookup: reference fiscal year
+  IF lv_ref IS NOT INITIAL.
+    PERFORM f_find_vtrule USING iv_mtart lv_ref CHANGING lv_count cv_bwtar.
+    lv_tried = |{ lv_ref } (first movement { ls_first-budat DATE = USER })|.
+    lv_src   = |ZPTP_301_VALTYPE { p_wdst }/{ iv_mtart }/{ lv_ref }, first movement | &&
+               |{ ls_first-budat DATE = USER }|.
+    IF lv_count > 1.
+*     4 several active entries: error, no fallback
+      cv_no  = '064'.
+      cv_msg = |Several active ZPTP_301_VALTYPE entries: plant { p_wdst }, mat. type | &&
+               |{ iv_mtart }, FY { lv_ref }|.
       RETURN.
     ENDIF.
-  ENDLOOP.
+  ENDIF.
+
+* 3 fallback: fiscal year of the posting date
+  IF lv_count = 0.
+    PERFORM f_find_vtrule USING iv_mtart gv_gjahr_bud CHANGING lv_count cv_bwtar.
+*   without reference year, LV_TRIED holds the reason of step 1
+    lv_src   = COND #( WHEN lv_ref IS NOT INITIAL
+                       THEN |ZPTP_301_VALTYPE { p_wdst }/{ iv_mtart }/{ gv_gjahr_bud } | &&
+                            |(posting date), none for { lv_ref }|
+                       ELSE |ZPTP_301_VALTYPE { p_wdst }/{ iv_mtart }/{ gv_gjahr_bud } | &&
+                            |(posting date), { lv_tried }| ).
+    lv_tried = COND #( WHEN lv_ref IS NOT INITIAL
+                       THEN |{ lv_tried }, { gv_gjahr_bud } (posting date)|
+                       ELSE |{ gv_gjahr_bud } (posting date; { lv_tried })| ).
+    IF lv_count > 1.
+*     4 several active entries
+      cv_no  = '064'.
+      cv_msg = |Several active ZPTP_301_VALTYPE entries: plant { p_wdst }, mat. type | &&
+               |{ iv_mtart }, FY { gv_gjahr_bud }|.
+      CLEAR cv_bwtar.
+      RETURN.
+    ENDIF.
+    IF lv_count = 0.
+*     5 no valuation type found
+      cv_no  = '058'.
+      cv_msg = |No active entry in ZPTP_301_VALTYPE: material { iv_matnr ALPHA = OUT }, | &&
+               |batch { iv_charg }, plant { p_wsrc } -> { p_wdst }, material type { iv_mtart }, | &&
+               |fiscal years { lv_tried } - batch not created|.
+      RETURN.
+    ENDIF.
+  ENDIF.
+
+* exactly one active entry
+  IF cv_bwtar IS INITIAL.
+    cv_no  = '058'.
+    cv_msg = |Active entry of ZPTP_301_VALTYPE has no valuation type ({ lv_src }) - batch | &&
+             |{ iv_charg } not created|.
+    RETURN.
+  ENDIF.
+  cv_info = lv_src.
+  cv_ok   = abap_true.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
@@ -3940,6 +4238,7 @@ FORM f_prepare_project.
         ls_raw  TYPE gty_input_raw,
         ls_src  TYPE gty_marc,
         lt_prev TYPE gtt_badkey,
+        lt_key  TYPE gtt_badkey,           " batches for F_READ_FIRST_MOVES [v1.38]
         lv_prev TYPE numc3.
 
   CLEAR: gt_input_raw, gt_prj_loc, gt_wbs.
@@ -4021,7 +4320,14 @@ FORM f_prepare_project.
     ls_raw-menge = ls_sum-menge.
     ls_raw-meins = ls_src-meins.
     APPEND ls_raw TO gt_input_raw.
+    IF lcl_help=>is_split_valuated( iv_matnr = ls_sum-matnr iv_bwkey = p_wdst ) = abap_true.
+      INSERT VALUE gty_badkey( matnr = ls_sum-matnr charg = ls_sum-charg ) INTO TABLE lt_key.
+    ENDIF.
   ENDLOOP.
+
+* first movement of the batches of split-valuated materials, for the
+* valuation type (F_PRJ_VALTYPE, online mode too)             [v1.38]
+  PERFORM f_read_first_moves USING lt_key.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
@@ -4144,7 +4450,12 @@ FORM f_process_prj_line USING is_raw TYPE gty_input_raw.
   ls_out-bwtar = ls_vt-bwtar.
   IF ls_vt-ok = abap_false.
     ls_out-message = |WBS { lv_posid }: { ls_vt-msg } - line skipped|.
-    PERFORM f_prj_skip USING ls_vt-id ls_vt-no lt_alloc CHANGING ls_out.
+*   no single ZPTP_301_VALTYPE entry (058, 064): error        [v1.38]
+    IF ls_vt-id = gc_msgid AND ( ls_vt-no = '058' OR ls_vt-no = '064' ).
+      PERFORM f_prj_skip_ty USING ls_vt-id ls_vt-no 'E' lt_alloc CHANGING ls_out.
+    ELSE.
+      PERFORM f_prj_skip USING ls_vt-id ls_vt-no lt_alloc CHANGING ls_out.
+    ENDIF.
     RETURN.
   ENDIF.
 
@@ -4225,7 +4536,9 @@ FORM f_process_prj_line USING is_raw TYPE gty_input_raw.
                    |{ COND string( WHEN p_test = abap_true
                                    THEN `Simulation OK - 301 Q checked (TESTRUN), no document`
                                    ELSE |Material document { lv_mblnr }/{ lv_mjahr } (301 Q)| ) }| &&
-                   |, valuation type { ls_vt-bwtar } ({ ls_vt-info })|.
+                   |{ COND string( WHEN ls_vt-bwtar IS INITIAL
+                                   THEN |, { ls_vt-info }|
+                                   ELSE |, valuation type { ls_vt-bwtar } ({ ls_vt-info })| ) }|.
   LOOP AT lt_alloc INTO ls_alloc.
     ls_out-lgort_src  = ls_alloc-lgort.
     ls_out-lgort_dst  = ls_alloc-lgort_dst.
@@ -4268,29 +4581,44 @@ FORM f_prj_skip USING    iv_id    TYPE symsgid
                          iv_no    TYPE symsgno
                          it_alloc TYPE gtt_alloc
                 CHANGING cs_out   TYPE gty_out.
+  PERFORM f_prj_skip_ty USING iv_id iv_no 'W' it_alloc CHANGING cs_out.
+ENDFORM.
+
+*&---------------------------------------------------------------------*
+*&      Form  F_PRJ_SKIP_TY                                     [v1.38]
+*&      F_PRJ_SKIP with the message type: W -> status W, E -> status E
+*&      (no single ZPTP_301_VALTYPE entry, 058 / 064).
+*&---------------------------------------------------------------------*
+FORM f_prj_skip_ty USING    iv_id    TYPE symsgid
+                            iv_no    TYPE symsgno
+                            iv_ty    TYPE symsgty
+                            it_alloc TYPE gtt_alloc
+                   CHANGING cs_out   TYPE gty_out.
   DATA ls_alloc TYPE gty_alloc.
 
-  cs_out-status = gc_st_warn.
+  cs_out-status = COND #( WHEN iv_ty = 'E' THEN gc_st_err ELSE gc_st_warn ).
   CLEAR: cs_out-mblnr, cs_out-mjahr.
   IF it_alloc IS INITIAL.
-    PERFORM f_add_log USING iv_id iv_no 'W' CHANGING cs_out.
+    PERFORM f_add_log USING iv_id iv_no iv_ty CHANGING cs_out.
     RETURN.
   ENDIF.
   LOOP AT it_alloc INTO ls_alloc.
     cs_out-lgort_src  = ls_alloc-lgort.
     cs_out-lgort_dst  = ls_alloc-lgort_dst.
     cs_out-menge_post = ls_alloc-menge.
-    PERFORM f_add_log USING iv_id iv_no 'W' CHANGING cs_out.
+    PERFORM f_add_log USING iv_id iv_no iv_ty CHANGING cs_out.
   ENDLOOP.
 ENDFORM.
 
 *&---------------------------------------------------------------------*
-*&      Form  F_PRJ_VALTYPE                                     [v1.9]
+*&      Form  F_PRJ_VALTYPE                              [v1.9, v1.38]
 *&      Transfer mode 4: valuation type of a batch in the target plant.
 *&        batch with a valuation type      -> that one, CV_ACT blank;
-*&        batch without valuation type     -> ZPTP_301_VALTYPE, CV_ACT C;
-*&        no batch in the target plant     -> ZPTP_301_VALTYPE, CV_ACT N.
-*&      The valuation type must exist for the material in the target plant
+*&        material not split-valuated in the target plant (v1.38): no
+*&        valuation type; no batch -> CV_ACT N, else CV_ACT blank;
+*&        split-valuated, batch without valuation type -> F_DETERMINE_
+*&        VALTYPE, CV_ACT C; no batch -> F_DETERMINE_VALTYPE, CV_ACT N.
+*&      A valuation type must exist for the material in the target plant
 *&      (MBEW), as in ZPTP_SPLIT_VAL_BATCH_COPY.
 *&---------------------------------------------------------------------*
 FORM f_prj_valtype USING    iv_matnr TYPE matnr
@@ -4304,7 +4632,8 @@ FORM f_prj_valtype USING    iv_matnr TYPE matnr
                             cv_msg   TYPE bapi_msg
                             cv_info  TYPE bapi_msg.
   DATA: lv_exist TYPE abap_bool,
-        lv_rule  TYPE string.
+        lv_ok    TYPE abap_bool,
+        lv_info  TYPE bapi_msg.
 
   CLEAR: cv_bwtar, cv_act, cv_ok, cv_id, cv_no, cv_msg, cv_info.
 
@@ -4315,18 +4644,27 @@ FORM f_prj_valtype USING    iv_matnr TYPE matnr
   IF lv_exist = abap_true AND lv_bwtar IS NOT INITIAL.
     cv_bwtar = lv_bwtar.
     cv_info  = |batch { iv_charg } of plant { p_wdst }|.
+
+  ELSEIF lcl_help=>is_split_valuated( iv_matnr = iv_matnr iv_bwkey = p_wdst ) = abap_false.
+*   rule 1: not split-valuated in the target plant, no valuation type
+*                                                              [v1.38]
+    cv_act  = COND #( WHEN lv_exist = abap_true THEN space ELSE 'N' ).
+    cv_info = |no valuation type, material not split-valuated in plant { p_wdst }| &&
+              |{ COND string( WHEN lv_exist = abap_false THEN `, batch created` ) }|.
+    cv_ok   = abap_true.
+    RETURN.
+
   ELSE.
+*   rule 2: ZPTP_301_VALTYPE, first movement / posting date fiscal year
+*                                                              [v1.38]
     cv_act = COND #( WHEN lv_exist = abap_true THEN 'C' ELSE 'N' ).
-    PERFORM f_valtype_rule USING iv_mtart CHANGING cv_bwtar lv_rule.
-    IF cv_bwtar IS INITIAL.
-      cv_id  = gc_msgid. cv_no = '058'.
-      cv_msg = |no active entry in ZPTP_301_VALTYPE for plant { p_wdst }, material type | &&
-               |{ iv_mtart }, fiscal year { gv_gjahr } - batch { iv_charg } | &&
-               |{ COND string( WHEN lv_exist = abap_true THEN `has no valuation type`
-                                                         ELSE `does not exist` ) } in plant { p_wdst }|.
+    PERFORM f_determine_valtype USING iv_matnr iv_charg iv_mtart
+                                CHANGING cv_bwtar lv_ok cv_no cv_msg lv_info.
+    IF lv_ok = abap_false.
+      cv_id = gc_msgid.                " 058 none, 064 several entries
       RETURN.
     ENDIF.
-    cv_info = |{ lv_rule }, batch { COND string( WHEN cv_act = 'C' THEN `valuation type set`
+    cv_info = |{ lv_info }, batch { COND string( WHEN cv_act = 'C' THEN `valuation type set`
                                                                    ELSE `created` ) }|.
   ENDIF.
 

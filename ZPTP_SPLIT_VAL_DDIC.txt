@@ -162,15 +162,28 @@ ACTIVE             XFELD                 Entry active flag
 Technical: buffering off, size category 0. No foreign key on WERKS / MTART
 (blank is a valid value). Maintenance: SM30 as for ZPTP_SLOC_MAP.
 
-Read by transfer mode 4 (project stock, P_XPRJ) for a batch that has no
-valuation type in the target plant, or does not exist there. Only ACTIVE = X
-entries of the fiscal year of the posting date are used; the fiscal year comes
-from the fiscal year variant of the company code of the target plant
-(T001W-BWKEY -> T001K-BUKRS -> T001-PERIV, DATE_TO_PERIOD_CONVERT). Most
-specific entry first: WERKS = target plant + MTART, WERKS = target plant +
-MTART blank, WERKS blank + MTART, both blank. An entry with BWTAR blank is
-ignored. The valuation type must exist for the material in the target plant
-(MBEW), otherwise the line is skipped (003).
+Read by ZPTP_SPLIT_VAL_MIG v1.38 for a batch of a material split-valuated in
+the target plant that has no line in the input file (option 1: SAP stock not
+in the file; transfer mode 4: project stock) and has no valuation type in the
+target plant, or does not exist there. Exact entry WERKS = target plant + MTART
+of the material, ACTIVE = X, GJAHR = fiscal year of the first movement of the
+batch in the source plant (MATDOC on MATBF, reversals and reversed movements
+left out), else the fiscal year of the posting date. Fiscal years come from the
+fiscal year variant of the company code of the target plant (T001W-BWKEY ->
+T001K-BUKRS -> T001-PERIV, DATE_TO_PERIOD_CONVERT). Several active entries for
+a fiscal year: error 064, no fallback (only possible if the key differs from
+the one above); no entry: error 058; an entry with BWTAR blank: error 058. The
+valuation type must exist for the material in the target plant (MBEW),
+otherwise the line is not transferred (003). Entries with WERKS or MTART blank
+are no longer read (v1.9 - v1.37: generic entries, fiscal year of the posting
+date only).
+
+Also read by ZPTP_SPLIT_VAL_BATCH_COPY v1.9 for batches of split-valuated
+materials that are not in its file (a file line overrides the table): exact entry WERKS = target
+plant + MTART of the material (no generic entry), ACTIVE = X, GJAHR = fiscal
+year of the first movement of the batch in the source plant (MATDOC, reversals
+left out), else the current fiscal year. Several active entries for a fiscal
+year are an error there (only possible if the key differs from the one above).
 
 Example:
   WERKS  MTART  GJAHR  BWTAR   ACTIVE
@@ -219,7 +232,7 @@ MESSAGE CLASS  ZPTP_SPLIT_VAL  (SE91) - used by the program
 056  Maximum &1 materials: &2 processed, &3 left for a next run      [v1.4]
 057  Batch already transferred: RUN_ID &1 on &2, document &3        [v1.8]
 058  No active entry in ZPTP_301_VALTYPE for plant &1, material type &2,
-     fiscal year &3                                                 [v1.9]
+     fiscal year &3                                   [v1.9, v1.38 option 1]
 059  Valuation type &1 set on batch &2 in plant &3                  [v1.9]
 060  Quantity forced to the stock of plant &1: &2 &3 (file &4)     [v1.12]
 061  Material &1 batch &2 not in source plant &3 - line not treated [v1.33]
@@ -227,6 +240,8 @@ MESSAGE CLASS  ZPTP_SPLIT_VAL  (SE91) - used by the program
      material &3, plant &4                                          [v1.35]
 063  Batches &1 and &2 both exist (material &3, plant &4) - &1 used,
      check for duplicate batches                                    [v1.35]
+064  Several active ZPTP_301_VALTYPE entries: plant &1, mat. type &2, FY &3
+                                                                    [v1.38]
 (The program passes MSGID/MSGNO together with a free text in MSGTX; the entries
  above are required so MSGID/MSGNO resolve to a text when the log is reported on.
  009 is also used when the material number cannot be converted (MATN1).

@@ -108,7 +108,7 @@ All four programs are reachable from the area menu `ZPTP_SVAL_MENU` (folder *Man
 
 - `ZPTP_SPLIT_VAL_MIG_UTILITY` (transaction `ZPTP_SPLIT_VAL_UTIL`) builds the input file from SAP data.
 - `ZPTP_SPLIT_VAL_MIG_UPLOAD` (transaction `ZPTP_SPLIT_VAL_UPLD`) copies a PC file to the application server, so that the migration can run as a background job.
-- `ZPTP_SPLIT_VAL_BATCH_COPY` (transaction `ZPTP_SPLIT_VAL_BCPY`) extends every batch of the source plant to the target plant (v1.0). For materials split-valuated in the target plant the valuation type comes from a CSV file separated by ";" (material, batch, valuation type), and a batch missing from the file is not copied (error); other batches are copied without valuation type.
+- `ZPTP_SPLIT_VAL_BATCH_COPY` (transaction `ZPTP_SPLIT_VAL_BCPY`) extends every batch of the source plant to the target plant (v1.0). For materials split-valuated in the target plant, a batch listed in the CSV file separated by ";" (material, batch, valuation type) takes the valuation type of the file. Any other batch takes it from table `ZPTP_301_VALTYPE`, for the fiscal year of the batch's first movement in the source plant, or the current fiscal year when there is none (v1.9). When no single valuation type is found, the batch is not copied (error). Other batches are copied without valuation type.
 
 ---
 

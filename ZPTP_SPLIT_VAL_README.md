@@ -130,6 +130,39 @@ This repository holds the code only; version history is kept in git (the former
   `P_DNL` *Download server -> PC*, `P_DFILE` *File on the server*, `P_DDIR` *Folder on the PC*, `P_DOVR`
   *Replace without asking*.
 
+## ZPTP_SPLIT_VAL_BATCH_COPY v1.9 (valuation type from ZPTP_301_VALTYPE)
+- Materials not split-valuated in the target plant: unchanged, the batch is copied without valuation type.
+- Split-valuated materials, Material + Batch in the file: the valuation type of the file line is used and
+  `ZPTP_301_VALTYPE` is not read for that batch (override). A file line without valuation type is an error,
+  as before; several valuation types for the batch too. Batch not in the file: `F_DETERMINE_VALTYPE` reads the active `ZPTP_301_VALTYPE` entries with WERKS = target plant, MTART =
+  material type (MARA), GJAHR =
+  1. the reference fiscal year: fiscal year of the earliest BUDAT of the batch in the source plant, from
+     MATDOC (`RECORD_TYPE = 'MDOC'`, `REVERSAL_MOVEMENT` and `CANCELLED` blank, so reversals and the
+     movements they reversed are left out). The material is matched on `MATBF` (material in respect of
+     which stock is managed), not `MATNR`: `MATBF` is a field of a MATDOC index (ATC priority 1 "Large
+     table: no field of a HDB table index"), and it equals MCHA-MATNR of the batch;
+  2. no movement, or no entry for that year: the current fiscal year (run date).
+
+  Several active entries for the year read: error, no fallback. No entry in either year: error naming
+  the material, batch, both plants, material type and the fiscal years tried. An entry with BWTAR
+  blank is an error too. In every error case the batch is not created and the run goes on.
+  No generic entries (blank plant or material type) are used here, unlike transfer mode 4 of
+  ZPTP_SPLIT_VAL_MIG. The valuation type must still exist in MBEW of the target plant.
+- Fiscal years use the fiscal year variant of the company code of the target plant (T001W-BWKEY ->
+  T001K-BUKRS -> T001-PERIV, `DATE_TO_PERIOD_CONVERT`, buffered per date in `GT_FY`), as in
+  ZPTP_SPLIT_VAL_MIG.
+- `F_READ_VALTYPE_DATA` (after `F_MATCH_FILE`) reads the fiscal year variant, the entries of the target
+  plant (`GT_VTRULE`) and the first movements (`GT_FIRST`, one `FOR ALL ENTRIES` select on MATDOC). It
+  does so only when a split-valuated batch is not in the file.
+- `P_FILE` stays mandatory. A file without item line is accepted: every valuation type then comes from
+  `ZPTP_301_VALTYPE`.
+- New ALV column *Val.type origin* (`VTSRC`), for example `File line 12 (overrides ZPTP_301_VALTYPE)`,
+  `ZPTP_301_VALTYPE 2025, first movement 12.03.2025`, `ZPTP_301_VALTYPE 2026 (current), none for 2025`.
+  The messages for a batch already in the target plant with another valuation type now say "expected"
+  instead of "file gives".
+- The errors are written to the result list (status E, message; spool in a job). The program still
+  has no database log.
+
 ## ZPTP_SPLIT_VAL_BATCH_COPY v1.8 (list by material)
 - ALV sort: `MATNR` ascending with a separator line (`GROUP = 'UL'`) between two materials, then `CHARG`
   ascending; the status grouping (`SORT_KEY`, `STATTX`) is no longer used for the sort (`STATTX` stays as
@@ -176,6 +209,33 @@ This repository holds the code only; version history is kept in git (the former
   `F_ITEM_TO_OUT`.
 - New ALV columns *Mat. type* (after Material) and *Price ctrl <source plant>* (after the split
   valuation column). The existing split-valuation column is now headed *Split val. <target plant>*.
+
+## What changed in v1.38 (valuation type of batches without a file line)
+- Scope: batches with stock in 8P01 and no line in the file: option 1, lines added by
+  `F_CHECK_SAP_NOT_IN_FILE` (stock of the transfer mode > 0), and transfer mode 4 (project stock, no
+  file). File lines, non-batch materials (v1.6 rule kept) and option 2 (non-split only, 025) are unchanged.
+- Batch already in 8Q01 with a valuation type: that one, nothing is determined (was: 019 on a mismatch
+  in option 1).
+- Rule 1, material not split-valuated in 8Q01: no valuation type. Mode 4 now transfers these batches
+  without valuation type (until v1.37 a valuation type was required, so they failed with 058 or 003).
+- Rule 2, split-valuated: `F_DETERMINE_VALTYPE` reads the active `ZPTP_301_VALTYPE` entries with WERKS =
+  8Q01 and MTART = material type, for (1) the fiscal year of the first posting date of the batch in 8P01
+  (`F_READ_FIRST_MOVES`: MATDOC on `MATBF`, `RECORD_TYPE = 'MDOC'`, `REVERSAL_MOVEMENT` and `CANCELLED`
+  blank), then (2) the fiscal year of the posting date `P_BUDAT` when there is no movement or no entry. Several
+  active entries: error 064 (new message), no fallback. No entry: error 058 with the material, batch,
+  both plants, material type and fiscal years tried. The batch is not created; the run goes on.
+  Option 1: status E (bad line, `F_PROCESS_LINE`). Mode 4: status E through the new `F_PRJ_SKIP_TY`;
+  the other mode 4 skips stay W.
+- Replaces in option 1 the valuation type of the other batches of the material in the file and the first
+  valuation type in 8Q01 (v1.6). In mode 4 it replaces the fiscal year of `P_BUDAT` and the generic
+  entries (`F_VALTYPE_RULE` removed).
+- `F_READ_VALTYPE_RULES`: once per run (`GV_VT_READ`). From `F_INIT` in mode 4, from
+  `F_CHECK_SAP_NOT_IN_FILE` when a batch needs it. Reads the fiscal year variant of 8Q01 (T001W → T001K →
+  T001-PERIV), the fiscal year of `P_BUDAT` (`GV_GJAHR_BUD`, replaces `GV_GJAHR`) and every active entry of
+  8Q01 (`GT_VTRULE`, now non-unique on MTART + GJAHR). `F_FISCAL_YEAR` buffers `DATE_TO_PERIOD_CONVERT`.
+  `F_PREPARE_PROJECT` reads the first movements, so online posting has them.
+- Same rules as ZPTP_SPLIT_VAL_BATCH_COPY v1.9 (code duplicated, as for `F_EXTEND_BATCH`).
+- SE91: create message 064 (see ZPTP_SPLIT_VAL_DDIC.txt).
 
 ## What changed in v1.37 (Simulation fields greyed out, not hidden, in Online mode)
 - `AT SELECTION-SCREEN OUTPUT`: in Online mode `P_TEST` and `P_NOLOG` stay on the screen with

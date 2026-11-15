@@ -15,7 +15,7 @@ ZPTP_SPLIT_VAL_MIG moves stock from plant 8P01 to the split-valuated plant 8Q01 
 | Default plants | 8P01 (source) → 8Q01 (target) |
 | Log tables | ZPTP_MOV_EXEC (movements), ZPTP_BATCH_EXT (batches) |
 | Storage location mapping | ZPTP_SLOC_MAP (SM30) |
-| Valuation types for project stock | ZPTP_301_VALTYPE |
+| Valuation types for batches without a file line and for project stock | ZPTP_301_VALTYPE |
 | Message class | ZPTP_SPLIT_VAL |
 
 ### 1.1 Four stock types, one per run
@@ -37,7 +37,7 @@ To migrate everything, run the report once per stock type.
 | --- | --- | --- | --- |
 | Driven by | **The input file** | **SAP stock of 8P01** | **SAP project stock of 8P01** |
 | The file | Says what to move: material, batch, valuation type, quantity | Only says which materials to **leave out** | Not read |
-| Valuation type | From the file | None (the material must not be split-valuated in 8Q01) | From the batch in 8Q01, else from ZPTP_301_VALTYPE |
+| Valuation type | From the file | None (the material must not be split-valuated in 8Q01) | From the batch in 8Q01, else from ZPTP_301_VALTYPE; none if the material is not split-valuated in 8Q01 |
 | Stock of 8P01 not in the file | Added and posted with a warning (Full mode), unless "Only file items in src plant" is ticked | This is what is moved | — |
 
 Option 1 moves what the file defines; option 2 moves everything else that is not split-valuated in 8Q01. Run with the same file, they cover the whole plant except split-valuated materials missing from the file.
@@ -52,7 +52,7 @@ Option 1 moves what the file defines; option 2 moves everything else that is not
 - [ ] Every material is extended to 8Q01, with a valuation segment for each valuation type of the file. A missing segment blocks the line (003, Full mode).
 - [ ] Batch management is the same in 8P01 and 8Q01.
 - [ ] Automatic creation of storage location data is allowed for movement type 301 (OMB3), or the material is already maintained in the receiving storage locations; otherwise the 301 fails with an SAP message.
-- [ ] Project stock: ZPTP_301_VALTYPE has active entries for the fiscal year of the posting date.
+- [ ] ZPTP_301_VALTYPE has one active entry per material type for 8Q01, for the fiscal years of the first movements in 8P01 and the fiscal year of the posting date (batches not in the file, project stock).
 
 ### 2.2 The input file (stock types 1 to 3)
 
@@ -261,8 +261,8 @@ Creates in 8Q01 the batches that have **no stock** in 8P01, without posting any 
 
 **Type 4 — project stock:**
 - SAP drives the run, for split-valuated and non-split materials alike; the split / non-split option is ignored, and no file is read (a file of option 1 has no effect).
-- Valuation type: the one of the batch in 8Q01; a batch without valuation type gets the one of ZPTP_301_VALTYPE (059); a missing batch is created with it.
-- ZPTP_301_VALTYPE is read for the fiscal year of the posting date, most specific entry first (plant + material type, plant, material type, generic). No entry: the line is skipped (058).
+- Valuation type: the one of the batch in 8Q01; none if the material is not split-valuated in 8Q01; otherwise a batch without valuation type gets the one of ZPTP_301_VALTYPE (059), and a missing batch is created with it.
+- ZPTP_301_VALTYPE is read for 8Q01 and the material type, for the fiscal year of the batch's first movement in 8P01 (reversals left out), else for the fiscal year of the posting date. Several active entries (064) or none (058): the line ends in E and the next one is processed.
 - The material must be extended to and batch-managed in 8Q01. A line that cannot be transferred gets status W and the next one is processed.
 - Full / Direct, the quantity and file name checks, "Force qty", "Only file items" and "Create batches with zero stock" do not apply.
 
@@ -456,7 +456,7 @@ A posted line keeps its success message ("Material document …"). Warnings foun
 | 006 | E | No stock of the type moved in 8P01 | Check MMBE: the stock may be of another type or already moved. A blank batch on a batch-managed material also gives 006. |
 | 007 / 008 | E | Quantity not numeric / negative | Correct the quantity. |
 | 009 | E | Layout error, mandatory field blank, invalid material | Correct the line and the separator. |
-| 010 | W / E | Batch not in the file, added with the SAP stock (posted). E: split-valuated in 8Q01 and no valuation type found | E: add the batch to the file with its valuation type. W: nothing, if the business agrees; otherwise use "Only file items in src plant". |
+| 010 | W / E | Batch not in the file, added with the SAP stock (posted). E: non-batch material split-valuated in 8Q01 and no valuation type found (batches: 058 / 064) | E: add the batch to the file with its valuation type. W: nothing, if the business agrees; otherwise use "Only file items in src plant". |
 | 011 | X | Stock not in the file, nothing of the type moved | Nothing. |
 | 012 | W | Batch column reduced to blank (placeholder value) | Use NO_BATCH or a blank. |
 | 013 | E | NO_BATCH on a batch-managed material | Put the real batch numbers in the file. |
@@ -475,7 +475,8 @@ A posted line keeps its success message ("Material document …"). Warnings foun
 | 055 | W | QI stock held by inspection lots stays in 8P01 | Close the lots (QA11) if that stock must move, then run again. |
 | 056 | W | Max. materials: processed and left | Run again with the same RUN_ID for the next materials. |
 | 057 | W | Batch already transferred in an earlier run | Check that it is not a duplicate before posting. |
-| 058 | W | Project stock: no ZPTP_301_VALTYPE entry | Maintain ZPTP_301_VALTYPE for the plant / material type and fiscal year. |
+| 058 | E | Batch not in the file, or project stock: no ZPTP_301_VALTYPE entry for the fiscal years tried | Maintain ZPTP_301_VALTYPE for 8Q01 / material type and one of the fiscal years in the message, then run again. |
+| 064 | E | Several active ZPTP_301_VALTYPE entries for 8Q01, material type and fiscal year | Keep one active entry, then run again. |
 | 059 | — | Project stock: valuation type set on the batch in 8Q01 | Nothing (in ZPTP_BATCH_EXT). |
 | 060 | W | Quantity forced to the stock of 8P01 | Nothing: expected with "Force qty"; check large differences. |
 | 062 | E | Batch with "," or "." not found, neither as written nor with the punctuation swapped (both values shown) | Check the batch in MSC3N and correct the file. |
